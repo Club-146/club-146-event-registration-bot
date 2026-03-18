@@ -45,6 +45,7 @@ def mock_app():
     with patch("src.routers.payment.app") as mock_app:
         # Configure src mocks with AsyncMock for async methods
         mock_app.get_user_registrations = AsyncMock(return_value=[])
+        mock_app.get_user_active_registrations = AsyncMock(return_value=[])
         mock_app.get_user_registration = AsyncMock(return_value=None)
         mock_app.save_payment_info = AsyncMock()
         mock_app.update_payment_status = AsyncMock()
@@ -154,7 +155,7 @@ async def test_pay_handler_no_registrations(
     mock_message, mock_state, mock_app, mock_send_safe
 ):
     # Configure the mock for a user with no registrations
-    mock_app.get_user_registrations.return_value = []
+    mock_app.get_user_active_registrations.return_value = []
     from src.routers.payment import (
         pay_handler,
     )
@@ -186,7 +187,11 @@ async def test_pay_handler_with_registration(
         "event_id": "aabbccddeeff00112233aabb",
         "graduate_type": GraduateType.GRADUATE.value,
     }
-    mock_app.get_user_registrations.return_value = [mock_registration]
+    mock_app.get_user_active_registrations.return_value = [mock_registration]
+
+    # Mock event lookup for is_event_free check
+    mock_event = {"pricing_type": "formula", "free_for_types": []}
+    mock_app.get_event_for_registration = AsyncMock(return_value=mock_event)
 
     # Mock the process_payment function
     with patch("src.routers.payment.process_payment") as mock_process:

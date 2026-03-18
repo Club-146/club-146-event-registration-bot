@@ -242,7 +242,7 @@ async def handle_registered_user(
             await process_payment(
                 message,
                 state,
-                city,
+                reg["event_id"],
                 graduation_year,
                 skip_instructions,
                 graduate_type=graduate_type,
