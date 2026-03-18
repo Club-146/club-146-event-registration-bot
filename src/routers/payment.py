@@ -119,12 +119,6 @@ async def process_payment(
     logger.info(f"Using original user information: ID={user_id}, username={username}")
     assert user_id is not None, "user_id must be resolved before processing payment"
 
-    # Get user registration to get graduate_type
-    if user_id:
-        registration = await app.get_user_registration(user_id)
-        if registration and "graduate_type" in registration:
-            graduate_type = registration["graduate_type"]
-
     # Load event from registration
     registration_data = await app.collection.find_one(
         {"user_id": user_id, "event_id": event_id}
@@ -132,6 +126,9 @@ async def process_payment(
     event = None
     if registration_data:
         event = await app.get_event_for_registration(registration_data)
+        # Get graduate_type from the correct registration
+        if "graduate_type" in registration_data:
+            graduate_type = registration_data["graduate_type"]
 
     # Calculate payment amount from event config
     if event:
@@ -223,7 +220,7 @@ async def process_payment(
         today = datetime.now()
         is_early = (
             early_bird_deadline
-            and today < early_bird_deadline
+            and today.date() <= early_bird_deadline.date()
             and early_bird_discount_amount > 0
         )
 
@@ -485,8 +482,8 @@ async def process_payment(
             else:
                 user_info += f"💰 Сумма к оплате: {needs_to_pay}\n"
 
-            # Get user registration for additional info
-            user_registration = await app.get_user_registration(user_id)
+            # Get user registration for additional info (use event-specific lookup)
+            user_registration = await app.collection.find_one({"user_id": user_id, "event_id": event_id})
             if user_registration:
                 user_info += (
                     f"👤 ФИО: {user_registration.get('full_name', 'Неизвестно')}\n"
@@ -722,7 +719,7 @@ async def pay_handler(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
     # Check if user is registered
-    registrations = await app.get_user_registrations(user_id)
+    registrations = await app.get_user_active_registrations(user_id)
 
     if not registrations:
         await send_safe(
@@ -856,9 +853,17 @@ async def confirm_payment_callback(callback_query: CallbackQuery, state: FSMCont
     if event_id in _LEGACY_CITY_CODES_REVERSE:
         city = _LEGACY_CITY_CODES_REVERSE[event_id]
         logger.warning(f"Legacy callback format, resolved city: {city}")
-        registration = await app.collection.find_one(
-            {"user_id": user_id, "target_city": city}
-        )
+        # Find all registrations for user+city, prefer non-archived event
+        cursor = app.collection.find({"user_id": user_id, "target_city": city})
+        candidates = await cursor.to_list(length=None)
+        registration = None
+        for candidate in candidates:
+            evt = await app.get_event_for_registration(candidate)
+            if evt and evt.get("status") != "archived":
+                registration = candidate
+                break
+        if not registration and candidates:
+            registration = candidates[0]
     else:
         logger.info(
             f"Processing payment confirmation: user_id={user_id}, event_id={event_id}"
@@ -889,6 +894,17 @@ async def confirm_payment_callback(callback_query: CallbackQuery, state: FSMCont
 
     assert callback_query.message is not None, "callback_query.message is None"
     chat_id = callback_query.message.chat.id
+
+    # Immediately remove inline buttons to prevent duplicate clicks
+    try:
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        # If buttons are already removed, this is a duplicate click — ignore
+        logger.warning(
+            f"Duplicate payment confirmation attempt for user {user_id}, event {event_id}"
+        )
+        await callback_query.answer("Этот платеж уже обрабатывается")
+        return
 
     # Handle different amount cases
     if amount_str == "custom" or not amount_str:
@@ -1015,13 +1031,13 @@ async def confirm_payment_callback(callback_query: CallbackQuery, state: FSMCont
                 new_caption = new_caption[-1024:]
 
             await callback_query.message.edit_caption(  # type: ignore[union-attr]
-                caption=new_caption, reply_markup=None
+                caption=new_caption
             )
         else:
             text = callback_query.message.text or ""  # type: ignore[union-attr]
             new_text = f"{text}\n\n{payment_status} для {user_info}"
 
-            await callback_query.message.edit_text(text=new_text, reply_markup=None)  # type: ignore[union-attr]
+            await callback_query.message.edit_text(text=new_text)  # type: ignore[union-attr]
 
     # Confirm to admin with a brief notification
     await callback_query.answer("Платеж подтвержден")
@@ -1052,9 +1068,17 @@ async def decline_payment_callback(callback_query: CallbackQuery, state: FSMCont
     if event_id in _LEGACY_CITY_CODES_REVERSE:
         city = _LEGACY_CITY_CODES_REVERSE[event_id]
         logger.warning(f"Legacy callback format, resolved city: {city}")
-        registration = await app.collection.find_one(
-            {"user_id": user_id, "target_city": city}
-        )
+        # Find all registrations for user+city, prefer non-archived event
+        cursor = app.collection.find({"user_id": user_id, "target_city": city})
+        candidates = await cursor.to_list(length=None)
+        registration = None
+        for candidate in candidates:
+            evt = await app.get_event_for_registration(candidate)
+            if evt and evt.get("status") != "archived":
+                registration = candidate
+                break
+        if not registration and candidates:
+            registration = candidates[0]
         event_id = registration.get("event_id", event_id) if registration else event_id
     else:
         logger.info(

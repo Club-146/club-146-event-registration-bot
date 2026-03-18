@@ -336,7 +336,7 @@ class App:
             early_bird_deadline = event.get("early_bird_deadline")
             if (
                 early_bird_deadline
-                and datetime.now() < early_bird_deadline
+                and datetime.now().date() <= early_bird_deadline.date()
                 and early_bird_discount > 0
             ):
                 discount = early_bird_discount
@@ -366,7 +366,7 @@ class App:
         early_bird_deadline = event.get("early_bird_deadline")
         if (
             early_bird_deadline
-            and datetime.now() < early_bird_deadline
+            and datetime.now().date() <= early_bird_deadline.date()
             and early_bird_discount > 0
         ):
             discounted_price = max(0, regular_price - early_bird_discount)
