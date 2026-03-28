@@ -165,11 +165,15 @@ async def export_handler(message: Message, state: FSMContext, app: App):
     if export_type_response == "registered":
         if export_format_response == "sheets":
             await notif.edit_text("Экспорт данных в Google Таблицы...")
-            result = await app.export_registered_users_to_google_sheets(event_id=selected_event_id)
+            result = await app.export_registered_users_to_google_sheets(
+                event_id=selected_event_id
+            )
             await send_safe(message.chat.id, result or "")
         else:
             await notif.edit_text("Экспорт данных в CSV файл...")
-            csv_content, result_message = await app.export_to_csv(event_id=selected_event_id)
+            csv_content, result_message = await app.export_to_csv(
+                event_id=selected_event_id
+            )
 
             if csv_content:
                 await send_safe(
@@ -188,7 +192,9 @@ async def export_handler(message: Message, state: FSMContext, app: App):
             )
         else:
             await notif.edit_text("Экспорт удаленных участников в CSV файл...")
-            csv_content, result_message = await app.export_deleted_users_to_csv(event_id=selected_event_id)
+            csv_content, result_message = await app.export_deleted_users_to_csv(
+                event_id=selected_event_id
+            )
 
             if csv_content:
                 await send_safe(
@@ -205,7 +211,9 @@ async def export_handler(message: Message, state: FSMContext, app: App):
             await send_safe(message.chat.id, result or "")
         else:
             await notif.edit_text("Экспорт отзывов в CSV файл...")
-            csv_content, result_message = await app.export_feedback_to_csv(event_id=selected_event_id)
+            csv_content, result_message = await app.export_feedback_to_csv(
+                event_id=selected_event_id
+            )
 
             if csv_content:
                 await send_safe(

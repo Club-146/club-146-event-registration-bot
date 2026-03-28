@@ -228,7 +228,9 @@ class SheetExporter:
         all_events = await self.app.get_all_events()
         return _build_events_map(all_events)
 
-    async def export_registered_users(self, silent=False, event_id: Optional[str] = None):
+    async def export_registered_users(
+        self, silent=False, event_id: Optional[str] = None
+    ):
         """Export registered users to Google Sheets."""
         query = {"event_id": event_id} if event_id else {}
         cursor = self.app.collection.find(query)
@@ -256,7 +258,9 @@ class SheetExporter:
         # Dynamic event-specific sheets (replace hardcoded cities)
         event_sheets = {}
         for eid, ev in events_map.items():
-            tab_name = ev.get("name", ev.get("city", eid))[:100]  # Sheets tab name limit
+            tab_name = ev.get("name", ev.get("city", eid))[
+                :100
+            ]  # Sheets tab name limit
             if tab_name not in worksheet_titles:
                 spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=20)
                 worksheet_titles.append(tab_name)
@@ -396,7 +400,9 @@ class SheetExporter:
             f"Успешно экспортировано {len(users)} удаленных пользователей в CSV",
         )
 
-    async def export_feedback_to_sheets(self, silent=False, event_id: Optional[str] = None):
+    async def export_feedback_to_sheets(
+        self, silent=False, event_id: Optional[str] = None
+    ):
         """Export feedback to a dedicated sheet in the Google Spreadsheet."""
         if not hasattr(self.app, "_feedback_collection"):
             self.app._feedback_collection = get_database().get_collection("feedback")

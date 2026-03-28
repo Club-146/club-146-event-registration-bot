@@ -2,10 +2,7 @@
 
 import base64
 import json
-import sys
 from pathlib import Path
-
-from loguru import logger
 
 
 ENV_FILE = Path(".env")
