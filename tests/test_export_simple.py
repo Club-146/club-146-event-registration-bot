@@ -15,6 +15,7 @@ class TestExportFunctions:
                 "graduation_year": 2010,
                 "class_letter": "A",
                 "target_city": "Москва",
+                "event_id": "evt1",
                 "user_id": 12345,
                 "username": "user1",
                 "graduate_type": "GRADUATE",
@@ -26,12 +27,14 @@ class TestExportFunctions:
                 "graduation_year": 2005,
                 "class_letter": "Б",
                 "target_city": "Пермь",
+                "event_id": "evt2",
                 "user_id": 67890,
                 "username": "user2",
                 "graduate_type": "TEACHER",
             },
         ]
         mock_app.collection.find.return_value = mock_cursor
+        mock_app.get_all_events = AsyncMock(return_value=[])
         return mock_app
 
     @pytest.mark.asyncio

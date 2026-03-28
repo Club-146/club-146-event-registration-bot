@@ -188,7 +188,7 @@ async def handle_registered_user(
         info_text += payment_status
         info_text += "\nЧто вы хотите сделать?"
 
-        choices = {}
+        choices = {"nothing": "Ничего, всё в порядке"}
         if needs_payment:
             choices["pay"] = "Оплатить участие"
 
@@ -198,8 +198,6 @@ async def handle_registered_user(
                 "cancel": "Отменить регистрацию",
             }
         )
-
-        choices["nothing"] = "Ничего, всё в порядке"
 
         response = await ask_user_choice(
             message.chat.id,

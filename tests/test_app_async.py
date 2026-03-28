@@ -431,15 +431,38 @@ class TestGetUsersBase:
 class TestFixDatabase:
     @pytest.mark.asyncio
     async def test_fix_with_changes(self, app):
+        from bson import ObjectId
+
+        # Mock events: one free event, one paid event with free_for_types
+        mock_events = [
+            {"_id": ObjectId(), "pricing_type": "free", "free_for_types": []},
+            {
+                "_id": ObjectId(),
+                "pricing_type": "formula",
+                "free_for_types": ["TEACHER", "ORGANIZER"],
+            },
+        ]
+        mock_events_cursor = MagicMock()
+        mock_events_cursor.sort = MagicMock(return_value=mock_events_cursor)
+        mock_events_cursor.to_list = AsyncMock(return_value=mock_events)
+        app.events_col.find = MagicMock(return_value=mock_events_cursor)
+
         app.collection.update_many = AsyncMock(return_value=MagicMock(modified_count=2))
         app.event_logs.insert_one = AsyncMock()
 
         result = await app._fix_database()
-        assert result["total_fixed"] == 6  # 2 * 3 categories
+        # 2 from free event + 2 from free_for_types on paid event
+        assert result["total_fixed"] == 4
         app.event_logs.insert_one.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_fix_no_changes(self, app):
+        # Mock events: no free events, no free_for_types
+        mock_events_cursor = MagicMock()
+        mock_events_cursor.sort = MagicMock(return_value=mock_events_cursor)
+        mock_events_cursor.to_list = AsyncMock(return_value=[])
+        app.events_col.find = MagicMock(return_value=mock_events_cursor)
+
         app.collection.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
         app.event_logs.insert_one = AsyncMock()
 

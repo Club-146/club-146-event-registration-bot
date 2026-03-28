@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+from typing import Dict, Optional
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -15,15 +16,167 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# Common headers for registered user exports
+REGISTERED_HEADERS = [
+    "ФИО",
+    "Год выпуска",
+    "Класс",
+    "Название встречи",
+    "Дата встречи",
+    "Город",
+    "Статус участника",
+    "Telegram Username",
+    "Статус оплаты",
+    "Сумма оплаты (факт)",
+    "Мин. сумма со скидкой",
+    "Регулярная сумма",
+    "Формула",
+    "Дата оплаты",
+    "Кол-во гостей",
+    "Имена гостей",
+]
+
+DELETED_HEADERS = [
+    "ФИО",
+    "Год выпуска",
+    "Класс",
+    "Название встречи",
+    "Дата встречи",
+    "Город",
+    "Статус участника",
+    "Telegram Username",
+    "Статус оплаты",
+    "Сумма оплаты (факт)",
+    "Дата удаления",
+    "Причина удаления",
+]
+
+FEEDBACK_HEADERS = [
+    "Имя",
+    "Username",
+    "ID пользователя",
+    "Название встречи",
+    "Дата встречи",
+    "Был на встрече",
+    "Город",
+    "Рекомендация (1-5)",
+    "Площадка (1-5)",
+    "Еда (1-5)",
+    "Развлечения (1-5)",
+    "Будет помогать",
+    "Комментарии",
+    "Предпочитаемый формат обратной связи",
+    "Дата отзыва",
+]
+
+
+def _build_events_map(events: list) -> Dict[str, Dict]:
+    """Build {event_id_str: event_doc} lookup from a list of event documents."""
+    return {str(e["_id"]): e for e in events}
+
+
+def _event_name(event: Optional[Dict]) -> str:
+    return event.get("name", "") if event else ""
+
+
+def _event_date(event: Optional[Dict]) -> str:
+    if not event:
+        return ""
+    return event.get("date_display", "") or str(event.get("date", ""))
+
+
+def _build_registered_row(user: Dict, event: Optional[Dict]) -> list:
+    """Build a row for registered user export."""
+    raw_status = user.get("payment_status", None)
+    payment_status = PAYMENT_STATUS_MAP.get(raw_status, PAYMENT_STATUS_MAP[None])
+    graduate_type = user.get("graduate_type", "GRADUATE")
+    graduate_type_display = GRADUATE_TYPE_MAP.get(graduate_type, "Выпускник")
+    guests = user.get("guests", [])
+    guest_count = user.get("guest_count", len(guests))
+    guest_names = ", ".join(g.get("name", "") for g in guests) if guests else ""
+
+    return [
+        user["full_name"],
+        user["graduation_year"],
+        user["class_letter"],
+        _event_name(event),
+        _event_date(event),
+        user["target_city"],
+        graduate_type_display,
+        user.get("username", ""),
+        payment_status,
+        user.get("payment_amount", 0),
+        user.get("discounted_payment_amount", 0),
+        user.get("regular_payment_amount", 0),
+        user.get("formula_payment_amount", 0),
+        user.get("payment_timestamp", ""),
+        guest_count,
+        guest_names,
+    ]
+
+
+def _build_deleted_row(user: Dict, event: Optional[Dict]) -> list:
+    """Build a row for deleted user export."""
+    raw_status = user.get("payment_status", None)
+    payment_status = PAYMENT_STATUS_MAP.get(raw_status, PAYMENT_STATUS_MAP[None])
+    graduate_type = user.get("graduate_type", "GRADUATE")
+    graduate_type_display = GRADUATE_TYPE_MAP.get(graduate_type, "Выпускник")
+
+    return [
+        user["full_name"],
+        user["graduation_year"],
+        user["class_letter"],
+        _event_name(event),
+        _event_date(event),
+        user["target_city"],
+        graduate_type_display,
+        user.get("username", ""),
+        payment_status,
+        user.get("payment_amount", 0),
+        user.get("deletion_timestamp", ""),
+        user.get("deletion_reason", ""),
+    ]
+
+
+def _build_feedback_row(item: Dict, event: Optional[Dict]) -> list:
+    """Build a row for feedback export."""
+    attended = "Да" if item.get("attended") else "Нет"
+
+    help_interest = item.get("help_interest", "")
+    if help_interest == "yes":
+        help_interest = "Да"
+    elif help_interest == "no":
+        help_interest = "Нет"
+    elif help_interest == "maybe":
+        help_interest = "Возможно"
+
+    feedback_format = item.get("feedback_format_preference", "")
+    if feedback_format == "bot":
+        feedback_format = "Через бота"
+    elif feedback_format == "google_forms":
+        feedback_format = "Гугл формы"
+
+    return [
+        item.get("full_name", ""),
+        item.get("username", ""),
+        item.get("user_id", ""),
+        _event_name(event),
+        _event_date(event),
+        attended,
+        item.get("city", ""),
+        item.get("recommendation_level", ""),
+        item.get("venue_rating", ""),
+        item.get("food_rating", ""),
+        item.get("entertainment_rating", ""),
+        help_interest,
+        item.get("comments", ""),
+        feedback_format,
+        item.get("timestamp", ""),
+    ]
+
 
 class SheetExporter:
     def __init__(self, spreadsheet_id: str, app: App):
-        """
-        Initialize the exporter with spreadsheet ID.
-
-        Args:
-            spreadsheet_id: The ID of the Google Sheet to export to
-        """
         self.spreadsheet_id = spreadsheet_id
         self.app = app
 
@@ -70,14 +223,15 @@ class SheetExporter:
         credentials = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
         return gspread.authorize(credentials)
 
-    async def export_registered_users(self, silent=False):
-        """Export all registered users to the Google Sheet
+    async def _prefetch_events_map(self) -> Dict[str, Dict]:
+        """Prefetch all events into a lookup dict."""
+        all_events = await self.app.get_all_events()
+        return _build_events_map(all_events)
 
-        Args:
-            silent: If True, suppresses any return messages for background operation
-        """
-        # Get all registered users from MongoDB
-        cursor = self.app.collection.find({})
+    async def export_registered_users(self, silent=False, event_id: Optional[str] = None):
+        """Export registered users to Google Sheets."""
+        query = {"event_id": event_id} if event_id else {}
+        cursor = self.app.collection.find(query)
         users = await cursor.to_list(length=None)
 
         if not users:
@@ -86,27 +240,28 @@ class SheetExporter:
                 return "Нет пользователей для экспорта"
             return None
 
+        events_map = await self._prefetch_events_map()
+
         # Connect to Google Sheets
         client = self._get_client()
-        # Get spreadsheet
         spreadsheet = client.open_by_key(self.spreadsheet_id)
-
-        # Ensure we have worksheets for each category
         worksheet_titles = [ws.title for ws in spreadsheet.worksheets()]
 
         # Main sheet
-        if "Все города" not in worksheet_titles:
-            spreadsheet.add_worksheet(title="Все города", rows=1000, cols=20)
-        main_sheet = spreadsheet.worksheet("Все города")
+        if "Все встречи" not in worksheet_titles:
+            spreadsheet.add_worksheet(title="Все встречи", rows=1000, cols=20)
+        main_sheet = spreadsheet.worksheet("Все встречи")
         main_sheet.clear()
 
-        # City-specific sheets
-        city_sheets = {}
-        for city in ["Москва", "Санкт-Петербург", "Пермь", "Белград"]:
-            if city not in worksheet_titles:
-                spreadsheet.add_worksheet(title=city, rows=1000, cols=20)
-            city_sheets[city] = spreadsheet.worksheet(city)
-            city_sheets[city].clear()
+        # Dynamic event-specific sheets (replace hardcoded cities)
+        event_sheets = {}
+        for eid, ev in events_map.items():
+            tab_name = ev.get("name", ev.get("city", eid))[:100]  # Sheets tab name limit
+            if tab_name not in worksheet_titles:
+                spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=20)
+                worksheet_titles.append(tab_name)
+            event_sheets[eid] = spreadsheet.worksheet(tab_name)
+            event_sheets[eid].clear()
 
         # Graduate type sheets
         type_sheets = {}
@@ -116,113 +271,49 @@ class SheetExporter:
             type_sheets[graduate_type] = spreadsheet.worksheet(graduate_type)
             type_sheets[graduate_type].clear()
 
-        # Prepare headers and data
-        headers = [
-            "ФИО",
-            "Год выпуска",
-            "Класс",
-            "Город участия во встрече",
-            "Статус участника",  # graduate_type
-            "Telegram Username",
-            "Статус оплаты",
-            "Сумма оплаты (факт)",
-            "Мин. сумма со скидкой",
-            "Регулярная сумма",
-            "Формула",
-            "Дата оплаты",
-            "Кол-во гостей",
-            "Имена гостей",
-        ]
-
         # Update all sheets with headers
-        main_sheet.update([headers])
-        for sheet in city_sheets.values():
-            sheet.update([headers])
+        main_sheet.update([REGISTERED_HEADERS])
+        for sheet in event_sheets.values():
+            sheet.update([REGISTERED_HEADERS])
         for sheet in type_sheets.values():
-            sheet.update([headers])
+            sheet.update([REGISTERED_HEADERS])
 
-        # Prepare user data for each sheet
+        # Build rows
         main_rows = []
-        city_rows = {city: [] for city in city_sheets.keys()}
-        type_rows = {graduate_type: [] for graduate_type in type_sheets.keys()}
+        event_rows = {eid: [] for eid in event_sheets}
+        type_rows = {gt: [] for gt in type_sheets}
+
         for user in users:
-            # Get payment status and all payment amounts
-            raw_status = user.get("payment_status", None)
-            payment_status = PAYMENT_STATUS_MAP.get(
-                raw_status, PAYMENT_STATUS_MAP[None]
-            )
-            payment_amount = user.get("payment_amount", 0)  # Actual payment amount
-            discounted_amount = user.get(
-                "discounted_payment_amount", 0
-            )  # Min amount with discount
-            regular_amount = user.get(
-                "regular_payment_amount", 0
-            )  # Regular amount without discount
-            formula_amount = user.get(
-                "formula_payment_amount", 0
-            )  # Amount from formula
-            payment_timestamp = user.get("payment_timestamp", "")
+            event = events_map.get(user.get("event_id", ""))
+            row = _build_registered_row(user, event)
+            main_rows.append(row)
 
-            # Get graduate type and convert to human-readable format
+            # Route to event sheet
+            uid_event = user.get("event_id", "")
+            if uid_event in event_rows:
+                event_rows[uid_event].append(row)
+
+            # Route to type sheet
             graduate_type = user.get("graduate_type", "GRADUATE")
-            graduate_type_display = GRADUATE_TYPE_MAP.get(
-                graduate_type, "Выпускник"
-            )  # Default to "Выпускник" if type is unknown
-
-            # Guest info
-            guests = user.get("guests", [])
-            guest_count = user.get("guest_count", len(guests))
-            guest_names = ", ".join(g.get("name", "") for g in guests) if guests else ""
-
-            # Create a row of user data
-            user_row = [
-                user["full_name"],
-                user["graduation_year"],
-                user["class_letter"],
-                user["target_city"],
-                graduate_type_display,  # Add graduate type
-                user.get("username", ""),
-                payment_status,
-                payment_amount,
-                discounted_amount,
-                regular_amount,
-                formula_amount,
-                payment_timestamp,
-                guest_count,
-                guest_names,
-            ]
-
-            # Add to main sheet
-            main_rows.append(user_row)
-
-            # Add to city sheet
-            city = user["target_city"]
-            if city in city_rows:
-                city_rows[city].append(user_row)
-
-            # Add to graduate type sheet
+            graduate_type_display = GRADUATE_TYPE_MAP.get(graduate_type, "Выпускник")
             if graduate_type_display == "Выпускник":
-                type_rows["Выпускники"].append(user_row)
+                type_rows["Выпускники"].append(row)
             elif graduate_type_display == "Учитель":
-                type_rows["Учителя"].append(user_row)
+                type_rows["Учителя"].append(row)
             elif graduate_type_display == "Друг":
-                type_rows["Друзья"].append(user_row)
+                type_rows["Друзья"].append(row)
             elif graduate_type_display == "Организатор":
-                type_rows["Организаторы"].append(user_row)
+                type_rows["Организаторы"].append(row)
 
-        # Update all sheets with user data
+        # Write data
         if main_rows:
             main_sheet.update(main_rows, "A2")
-
-        # Update city sheets
-        for city, rows in city_rows.items():
+        for eid, rows in event_rows.items():
             if rows:
-                city_sheets[city].update(rows, "A2")
-
-        # Update graduate type sheets
-        for graduate_type, rows in type_rows.items():
+                event_sheets[eid].update(rows, "A2")
+        for gt, rows in type_rows.items():
             if rows:
-                type_sheets[graduate_type].update(rows, "A2")
+                type_sheets[gt].update(rows, "A2")
 
         message = (
             f"Успешно экспортировано {len(main_rows)} пользователей в Google Таблицы\n"
@@ -234,93 +325,29 @@ class SheetExporter:
             return message
         return None
 
-    async def export_to_csv(self):
-        """Export all registered users to a CSV file"""
+    async def export_to_csv(self, event_id: Optional[str] = None):
+        """Export registered users to a CSV file."""
         try:
-            # Get all registered users from MongoDB
-            cursor = self.app.collection.find({})
+            query = {"event_id": event_id} if event_id else {}
+            cursor = self.app.collection.find(query)
             users = await cursor.to_list(length=None)
 
             if not users:
                 logger.info("Нет пользователей для экспорта")
                 return None, "Нет пользователей для экспорта"
 
-            # Create CSV content
+            events_map = await self._prefetch_events_map()
+
             import csv
             from io import StringIO
 
             output = StringIO()
             writer = csv.writer(output)
+            writer.writerow(REGISTERED_HEADERS)
 
-            # Write headers
-            headers = [
-                "ФИО",
-                "Год выпуска",
-                "Класс",
-                "Город участия во встрече",
-                "Статус участника",  # graduate_type
-                "Telegram Username",
-                "Статус оплаты",
-                "Сумма оплаты (факт)",
-                "Мин. сумма со скидкой",
-                "Регулярная сумма",
-                "Формула",
-                "Дата оплаты",
-                "Кол-во гостей",
-                "Имена гостей",
-            ]
-            writer.writerow(headers)
-
-            # Write user data
             for user in users:
-                # Get payment status and all payment amounts
-                raw_status = user.get("payment_status", None)
-                payment_status = PAYMENT_STATUS_MAP.get(
-                    raw_status, PAYMENT_STATUS_MAP[None]
-                )
-                payment_amount = user.get("payment_amount", 0)  # Actual payment amount
-                discounted_amount = user.get(
-                    "discounted_payment_amount", 0
-                )  # Min amount with discount
-                regular_amount = user.get(
-                    "regular_payment_amount", 0
-                )  # Regular amount without discount
-                formula_amount = user.get(
-                    "formula_payment_amount", 0
-                )  # Amount from formula
-                payment_timestamp = user.get("payment_timestamp", "")
-
-                # Get graduate type and convert to human-readable format
-                graduate_type = user.get("graduate_type", "GRADUATE")
-                graduate_type_display = GRADUATE_TYPE_MAP.get(
-                    graduate_type, "Выпускник"
-                )  # Default to "Выпускник" if type is unknown
-
-                # Guest info
-                guests = user.get("guests", [])
-                guest_count = user.get("guest_count", len(guests))
-                guest_names = (
-                    ", ".join(g.get("name", "") for g in guests) if guests else ""
-                )
-
-                writer.writerow(
-                    [
-                        user["full_name"],
-                        user["graduation_year"],
-                        user["class_letter"],
-                        user["target_city"],
-                        graduate_type_display,  # Add graduate type
-                        user.get("username", ""),
-                        payment_status,
-                        payment_amount,
-                        discounted_amount,
-                        regular_amount,
-                        formula_amount,
-                        payment_timestamp,
-                        guest_count,
-                        guest_names,
-                    ]
-                )
+                event = events_map.get(user.get("event_id", ""))
+                writer.writerow(_build_registered_row(user, event))
 
             csv_content = output.getvalue()
             output.close()
@@ -335,71 +362,28 @@ class SheetExporter:
             logger.error(f"Ошибка при экспорте данных в CSV: {e}")
             return None, f"Ошибка при экспорте данных в CSV: {e}"
 
-    async def export_deleted_users_to_csv(self):
-        """Export all deleted users to a CSV file"""
-        # Get all deleted users from MongoDB
-        cursor = self.app.deleted_users.find({})
+    async def export_deleted_users_to_csv(self, event_id: Optional[str] = None):
+        """Export deleted users to a CSV file."""
+        query = {"event_id": event_id} if event_id else {}
+        cursor = self.app.deleted_users.find(query)
         users = await cursor.to_list(length=None)
 
         if not users:
             logger.info("Нет удаленных пользователей для экспорта")
             return None, "Нет удаленных пользователей для экспорта"
 
-        # Create CSV content
+        events_map = await self._prefetch_events_map()
+
         import csv
         from io import StringIO
 
         output = StringIO()
         writer = csv.writer(output)
+        writer.writerow(DELETED_HEADERS)
 
-        # Write headers
-        headers = [
-            "ФИО",
-            "Год выпуска",
-            "Класс",
-            "Город участия во встрече",
-            "Статус участника",  # graduate_type
-            "Telegram Username",
-            "Статус оплаты",
-            "Сумма оплаты (факт)",
-            "Дата удаления",
-            "Причина удаления",
-        ]
-        writer.writerow(headers)
-
-        # Write user data
         for user in users:
-            # Get payment status and amount
-            raw_status = user.get("payment_status", None)
-            payment_status = PAYMENT_STATUS_MAP.get(
-                raw_status, PAYMENT_STATUS_MAP[None]
-            )
-            payment_amount = user.get("payment_amount", 0)  # Actual payment amount
-
-            # Get graduate type and convert to human-readable format
-            graduate_type = user.get("graduate_type", "GRADUATE")
-            graduate_type_display = GRADUATE_TYPE_MAP.get(
-                graduate_type, "Выпускник"
-            )  # Default to "Выпускник" if type is unknown
-
-            # Get deletion info
-            deletion_timestamp = user.get("deletion_timestamp", "")
-            deletion_reason = user.get("deletion_reason", "")
-
-            writer.writerow(
-                [
-                    user["full_name"],
-                    user["graduation_year"],
-                    user["class_letter"],
-                    user["target_city"],
-                    graduate_type_display,
-                    user.get("username", ""),
-                    payment_status,
-                    payment_amount,
-                    deletion_timestamp,
-                    deletion_reason,
-                ]
-            )
+            event = events_map.get(user.get("event_id", ""))
+            writer.writerow(_build_deleted_row(user, event))
 
         csv_content = output.getvalue()
         output.close()
@@ -412,18 +396,13 @@ class SheetExporter:
             f"Успешно экспортировано {len(users)} удаленных пользователей в CSV",
         )
 
-    async def export_feedback_to_sheets(self, silent=False):
-        """Export all feedback to a dedicated sheet in the Google Spreadsheet
-
-        Args:
-            silent: If True, suppresses any return messages for background operation
-        """
-        # Create feedback collection if it doesn't exist
+    async def export_feedback_to_sheets(self, silent=False, event_id: Optional[str] = None):
+        """Export feedback to a dedicated sheet in the Google Spreadsheet."""
         if not hasattr(self.app, "_feedback_collection"):
             self.app._feedback_collection = get_database().get_collection("feedback")
 
-        # Get all feedback from MongoDB
-        cursor = self.app._feedback_collection.find({})
+        query = {"event_id": event_id} if event_id else {}
+        cursor = self.app._feedback_collection.find(query)
         feedback_items = await cursor.to_list(length=None)
 
         if not feedback_items:
@@ -432,13 +411,10 @@ class SheetExporter:
                 return "Нет отзывов для экспорта"
             return None
 
-        # Connect to Google Sheets
+        events_map = await self._prefetch_events_map()
+
         client = self._get_client()
-
-        # Get spreadsheet
         spreadsheet = client.open_by_key(self.spreadsheet_id)
-
-        # Ensure we have a worksheet for feedback
         worksheet_titles = [ws.title for ws in spreadsheet.worksheets()]
 
         if "Отзывы" not in worksheet_titles:
@@ -446,69 +422,13 @@ class SheetExporter:
         feedback_sheet = spreadsheet.worksheet("Отзывы")
         feedback_sheet.clear()
 
-        # Prepare headers
-        headers = [
-            "Имя",
-            "Username",
-            "ID пользователя",
-            "Был на встрече",
-            "Город",
-            "Рекомендация (1-5)",
-            "Площадка (1-5)",
-            "Еда (1-5)",
-            "Развлечения (1-5)",
-            "Будет помогать",
-            "Комментарии",
-            "Предпочитаемый формат обратной связи",
-            "Дата отзыва",
-        ]
+        feedback_sheet.update([FEEDBACK_HEADERS])
 
-        # Update sheet with headers
-        feedback_sheet.update([headers])
-
-        # Prepare feedback data rows
         feedback_rows = []
-
         for item in feedback_items:
-            # Format attended status
-            attended = "Да" if item.get("attended") else "Нет"
+            event = events_map.get(item.get("event_id", ""))
+            feedback_rows.append(_build_feedback_row(item, event))
 
-            # Format help interest
-            help_interest = item.get("help_interest", "")
-            if help_interest == "yes":
-                help_interest = "Да"
-            elif help_interest == "no":
-                help_interest = "Нет"
-            elif help_interest == "maybe":
-                help_interest = "Возможно"
-
-            # Format feedback format preference
-            feedback_format = item.get("feedback_format_preference", "")
-            if feedback_format == "bot":
-                feedback_format = "Через бота"
-            elif feedback_format == "google_forms":
-                feedback_format = "Гугл формы"
-
-            # Create a row of feedback data
-            feedback_row = [
-                item.get("full_name", ""),
-                item.get("username", ""),
-                item.get("user_id", ""),
-                attended,
-                item.get("city", ""),
-                item.get("recommendation_level", ""),
-                item.get("venue_rating", ""),
-                item.get("food_rating", ""),
-                item.get("entertainment_rating", ""),
-                help_interest,
-                item.get("comments", ""),
-                feedback_format,
-                item.get("timestamp", ""),
-            ]
-
-            feedback_rows.append(feedback_row)
-
-        # Update sheet with feedback data
         if feedback_rows:
             feedback_sheet.update(feedback_rows, "A2")
 
@@ -522,86 +442,34 @@ class SheetExporter:
             return message
         return None
 
-    async def export_feedback_to_csv(self):
-        """Export all feedback to a CSV file"""
+    async def export_feedback_to_csv(self, event_id: Optional[str] = None):
+        """Export feedback to a CSV file."""
         try:
-            # Create feedback collection if it doesn't exist
             if not hasattr(self.app, "_feedback_collection"):
                 self.app._feedback_collection = get_database().get_collection(
                     "feedback"
                 )
 
-            # Get all feedback from MongoDB
-            cursor = self.app._feedback_collection.find({})
+            query = {"event_id": event_id} if event_id else {}
+            cursor = self.app._feedback_collection.find(query)
             feedback_items = await cursor.to_list(length=None)
 
             if not feedback_items:
                 logger.info("Нет отзывов для экспорта")
                 return None, "Нет отзывов для экспорта"
 
-            # Create CSV content
+            events_map = await self._prefetch_events_map()
+
             import csv
             from io import StringIO
 
             output = StringIO()
             writer = csv.writer(output)
+            writer.writerow(FEEDBACK_HEADERS)
 
-            # Write headers
-            headers = [
-                "Имя",
-                "Username",
-                "ID пользователя",
-                "Был на встрече",
-                "Город",
-                "Рекомендация (1-5)",
-                "Площадка (1-5)",
-                "Еда (1-5)",
-                "Развлечения (1-5)",
-                "Будет помогать",
-                "Комментарии",
-                "Предпочитаемый формат обратной связи",
-                "Дата отзыва",
-            ]
-            writer.writerow(headers)
-
-            # Write feedback data
             for item in feedback_items:
-                # Format attended status
-                attended = "Да" if item.get("attended") else "Нет"
-
-                # Format help interest
-                help_interest = item.get("help_interest", "")
-                if help_interest == "yes":
-                    help_interest = "Да"
-                elif help_interest == "no":
-                    help_interest = "Нет"
-                elif help_interest == "maybe":
-                    help_interest = "Возможно"
-
-                # Format feedback format preference
-                feedback_format = item.get("feedback_format_preference", "")
-                if feedback_format == "bot":
-                    feedback_format = "Через бота"
-                elif feedback_format == "google_forms":
-                    feedback_format = "Гугл формы"
-
-                writer.writerow(
-                    [
-                        item.get("full_name", ""),
-                        item.get("username", ""),
-                        item.get("user_id", ""),
-                        attended,
-                        item.get("city", ""),
-                        item.get("recommendation_level", ""),
-                        item.get("venue_rating", ""),
-                        item.get("food_rating", ""),
-                        item.get("entertainment_rating", ""),
-                        help_interest,
-                        item.get("comments", ""),
-                        feedback_format,
-                        item.get("timestamp", ""),
-                    ]
-                )
+                event = events_map.get(item.get("event_id", ""))
+                writer.writerow(_build_feedback_row(item, event))
 
             csv_content = output.getvalue()
             output.close()

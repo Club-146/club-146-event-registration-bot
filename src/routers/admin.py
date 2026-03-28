@@ -137,6 +137,21 @@ async def export_handler(message: Message, state: FSMContext, app: App):
         timeout=None,
     )
 
+    # Ask which event to export
+    event_choices = {"all": "Все встречи"}
+    all_events = await app.get_all_events()
+    for ev in all_events:
+        eid = str(ev["_id"])
+        event_choices[eid] = ev.get("name", ev.get("city", eid))
+    event_response = await ask_user_choice(
+        message.chat.id,
+        "За какую встречу экспортировать?",
+        choices=event_choices,
+        state=state,
+        timeout=None,
+    )
+    selected_event_id = event_response if event_response != "all" else None
+
     # Ask user for export format
     export_format_response = await ask_user_choice(
         message.chat.id,
@@ -150,15 +165,13 @@ async def export_handler(message: Message, state: FSMContext, app: App):
     if export_type_response == "registered":
         if export_format_response == "sheets":
             await notif.edit_text("Экспорт данных в Google Таблицы...")
-            result = await app.export_registered_users_to_google_sheets()
+            result = await app.export_registered_users_to_google_sheets(event_id=selected_event_id)
             await send_safe(message.chat.id, result or "")
         else:
-            # Export to CSV
             await notif.edit_text("Экспорт данных в CSV файл...")
-            csv_content, result_message = await app.export_to_csv()
+            csv_content, result_message = await app.export_to_csv(event_id=selected_event_id)
 
             if csv_content:
-                # Send the CSV content as a file using send_safe
                 await send_safe(
                     message.chat.id, csv_content, filename="участники_встречи.csv"
                 )
@@ -174,12 +187,10 @@ async def export_handler(message: Message, state: FSMContext, app: App):
                 "Экспорт удаленных участников в Google Таблицы пока не поддерживается",
             )
         else:
-            # Export to CSV
             await notif.edit_text("Экспорт удаленных участников в CSV файл...")
-            csv_content, result_message = await app.export_deleted_users_to_csv()
+            csv_content, result_message = await app.export_deleted_users_to_csv(event_id=selected_event_id)
 
             if csv_content:
-                # Send the CSV content as a file using send_safe
                 await send_safe(
                     message.chat.id, csv_content, filename="удаленные_участники.csv"
                 )
@@ -190,15 +201,13 @@ async def export_handler(message: Message, state: FSMContext, app: App):
     elif export_type_response == "feedback":
         if export_format_response == "sheets":
             await notif.edit_text("Экспорт отзывов в Google Таблицы...")
-            result = await app.export_feedback_to_sheets()
+            result = await app.export_feedback_to_sheets(event_id=selected_event_id)
             await send_safe(message.chat.id, result or "")
         else:
-            # Export to CSV
             await notif.edit_text("Экспорт отзывов в CSV файл...")
-            csv_content, result_message = await app.export_feedback_to_csv()
+            csv_content, result_message = await app.export_feedback_to_csv(event_id=selected_event_id)
 
             if csv_content:
-                # Send the CSV content as a file using send_safe
                 await send_safe(
                     message.chat.id, csv_content, filename="отзывы_пользователей.csv"
                 )
