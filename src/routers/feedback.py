@@ -166,81 +166,73 @@ async def save_feedback_and_thank(
     return True
 
 
-@commands_menu.add_command("feedback", "Оставить отзыв о встрече выпускников")
-@router.message(Command("feedback"))
-async def feedback_handler(message: Message, state: FSMContext, app: App):
-    """Handle user feedback for alumni meetup"""
-    if message.from_user is None:
-        logger.error("Message from_user is None")
-        return
+_RATING_CHOICES = {
+    "1": "1",
+    "2": "2",
+    "3": "3",
+    "4": "4",
+    "5": "5",
+    "skip": "Пропустить вопрос",
+    "cancel": "Отмена",
+}
 
-    # Get existing user data if available
-    user_data = await app.collection.find_one({"user_id": message.from_user.id})
-    full_name = user_data.get("full_name") if user_data else None
 
-    # Initialize feedback data dict
-    feedback_data = {
-        "user_id": message.from_user.id,
-        "username": message.from_user.username,
-        "full_name": full_name,
-    }
-
-    # Start feedback flow
-    await send_safe(
+async def _ask_rating_step(
+    message,
+    state,
+    app: App,
+    feedback_data: dict,
+    question: str,
+    log_type: str,
+    data_key: str,
+    feedback_key: str,
+    low_rating_label: str,
+    city,
+    user_id: int,
+    username,
+) -> bool:
+    """Ask a 1-5 rating question, handle skip/cancel, save log. Returns False on cancel."""
+    rating = await ask_user_choice(
         message.chat.id,
-        "Привет! \n"
-        "Я чат-бот, собираю обратную связь по встрече выпускников. \n\n"
-        "Благодаря в том числе и твоей обратной связи мы продолжаем улучшать наши мероприятия, "
-        "помоги нам пожалуйста, потрать 4 минуты :)",
-    )
-
-    if app.settings.delay_messages:
-        await asyncio.sleep(5)
-
-    # Step 1: Ask if user attended the meetup
-    attendance = await ask_user_choice(
-        message.chat.id,
-        "Ты был на встрече выпускников?",
-        choices={
-            "yes": "Да",
-            "no": "Нет",
-            "cancel": "Отмена опроса",
-        },
+        question,
+        choices=_RATING_CHOICES,
         state=state,
-        timeout=None,
-        columns=2,
         default_choice="cancel",
         highlight_default=False,
+        timeout=None,
+        columns=5,
     )
 
-    if attendance == "cancel":
-        # Save minimal feedback before exiting
-        await save_feedback_and_thank(
-            message,
-            state,
-            app,
-            feedback_data,
-            is_cancel=True,
-        )
-        return
+    if rating == "cancel":
+        await save_feedback_and_thank(message, state, app, feedback_data, is_cancel=True)
+        return False
 
-    feedback_data["attended"] = attendance == "yes"
+    if rating == "skip":
+        rating = None
+        await send_safe(message.chat.id, "Спасибо! Вопрос пропущен.")
 
-    # If they didn't attend, save feedback and finish
-    if not feedback_data["attended"]:
-        # Save feedback data and thank the user
-        await save_feedback_and_thank(
-            message,
-            state,
-            app,
-            feedback_data,
-        )
-        return
+    feedback_data[data_key] = rating
 
-    # User attended, continue with feedback questions
+    await app.save_event_log(
+        "feedback",
+        {"type": log_type, "rating": rating, "city": city},
+        user_id,
+        username,
+    )
 
-    # Step 2: Ask which city the user attended
-    # Build choices from events that have passed or are archived
+    low_rating_feedback = await ask_low_rating_feedback(
+        message, state, app, low_rating_label, rating, user_id, username
+    )
+    if low_rating_feedback:
+        feedback_data[feedback_key] = low_rating_feedback
+
+    return True
+
+
+async def _ask_attended_city(
+    message, state, app: App, feedback_data: dict
+) -> tuple:
+    """Ask attended city. Returns (city, should_continue). city=None means skipped."""
     city_choices = {}
     all_events = await app.get_all_events()
     for ev in all_events:
@@ -263,292 +255,20 @@ async def feedback_handler(message: Message, state: FSMContext, app: App):
     )
 
     if city == "cancel":
-        # Save feedback data and thank the user
-        await save_feedback_and_thank(
-            message,
-            state,
-            app,
-            feedback_data,
-            is_cancel=True,
-        )
-        return
+        await save_feedback_and_thank(message, state, app, feedback_data, is_cancel=True)
+        return None, False
 
     if city == "skip":
         city = None
         await send_safe(message.chat.id, "Спасибо! Вопрос пропущен.")
 
-    feedback_data["city"] = city
+    return city, True
 
-    await app.save_event_log(
-        "feedback",
-        {
-            "type": "city_selection",
-            "city": city,
-        },
-        message.from_user.id,
-        message.from_user.username,
-    )
 
-    # Step 3: Ask recommendation level
-    recommendation = await ask_user_choice(
-        message.chat.id,
-        "Круто! Насколько ты бы порекомендовал своим одноклассникам участвовать в следующем году?\n\n"
-        "1 - лучше заняться чем-то другим\n"
-        "2 - зайти на полчаса\n"
-        "3 - посидеть пару часов с одноклассниками поговорить\n"
-        "4 - посидеть до закрытия - познакомиться с другими поколениями выпускников\n"
-        "5 - моя бы воля - сделали бы afterparty до последнего танцующего!",
-        choices={
-            "1": "1",
-            "2": "2",
-            "3": "3",
-            "4": "4",
-            "5": "5",
-            "skip": "Пропустить вопрос",
-            "cancel": "Отмена",
-        },
-        state=state,
-        default_choice="cancel",
-        highlight_default=False,
-        timeout=None,
-        columns=5,
-    )
-
-    if recommendation == "cancel":
-        # Save feedback data and thank the user
-        await save_feedback_and_thank(
-            message,
-            state,
-            app,
-            feedback_data,
-            is_cancel=True,
-        )
-        return
-
-    if recommendation == "skip":
-        recommendation = None
-        await send_safe(message.chat.id, "Спасибо! Вопрос пропущен.")
-
-    feedback_data["recommendation_level"] = recommendation
-
-    # Log recommendation level
-    await app.save_event_log(
-        "feedback",
-        {
-            "type": "recommendation_level",
-            "level": recommendation,
-            "city": city,
-        },
-        message.from_user.id,
-        message.from_user.username,
-    )
-
-    # Ask for feedback if rating is low
-    low_rating_feedback = await ask_low_rating_feedback(
-        message,
-        state,
-        app,
-        "общей рекомендации",
-        recommendation,
-        message.from_user.id,
-        message.from_user.username,
-    )
-    if low_rating_feedback:
-        feedback_data["recommendation_feedback"] = low_rating_feedback
-
-    # Step 4: Ask venue rating
-    venue_rating = await ask_user_choice(
-        message.chat.id,
-        "Насколько тебе понравилась площадка?\n\n"
-        "1 - совсем не понравилась\n"
-        "5 - супер, обязательно в этом же месте в следующем году!",
-        choices={
-            "1": "1",
-            "2": "2",
-            "3": "3",
-            "4": "4",
-            "5": "5",
-            "skip": "Пропустить вопрос",
-            "cancel": "Отмена",
-        },
-        state=state,
-        highlight_default=False,
-        timeout=None,
-        default_choice="cancel",
-        columns=5,
-    )
-
-    if venue_rating == "cancel":
-        # Save feedback data and thank the user
-        await save_feedback_and_thank(
-            message,
-            state,
-            app,
-            feedback_data,
-            is_cancel=True,
-        )
-        return
-
-    if venue_rating == "skip":
-        venue_rating = None
-        await send_safe(message.chat.id, "Спасибо! Вопрос пропущен.")
-
-    feedback_data["venue_rating"] = venue_rating
-
-    # Log venue rating
-    await app.save_event_log(
-        "feedback",
-        {
-            "type": "venue_rating",
-            "rating": venue_rating,
-            "city": city,
-        },
-        message.from_user.id,
-        message.from_user.username,
-    )
-
-    # Ask for feedback if rating is low
-    low_rating_feedback = await ask_low_rating_feedback(
-        message,
-        state,
-        app,
-        "площадке",
-        venue_rating,
-        message.from_user.id,
-        message.from_user.username,
-    )
-    if low_rating_feedback:
-        feedback_data["venue_feedback"] = low_rating_feedback
-
-    # Step 5: Ask food and drinks rating
-    food_rating = await ask_user_choice(
-        message.chat.id,
-        "Насколько понравилась еда и напитки?\n\n"
-        "1 - несъедобно\n"
-        "5 - каждый бы день так есть и пить!",
-        choices={
-            "1": "1",
-            "2": "2",
-            "3": "3",
-            "4": "4",
-            "5": "5",
-            "skip": "Пропустить вопрос",
-            "cancel": "Отмена",
-        },
-        default_choice="cancel",
-        highlight_default=False,
-        state=state,
-        timeout=None,
-        columns=5,
-    )
-
-    if food_rating == "cancel":
-        # Save feedback data and thank the user
-        await save_feedback_and_thank(
-            message,
-            state,
-            app,
-            feedback_data,
-            is_cancel=True,
-        )
-        return
-
-    if food_rating == "skip":
-        food_rating = None
-        await send_safe(message.chat.id, "Спасибо! Вопрос пропущен.")
-
-    feedback_data["food_rating"] = food_rating
-
-    # Log food rating
-    await app.save_event_log(
-        "feedback",
-        {
-            "type": "food_rating",
-            "rating": food_rating,
-            "city": city,
-        },
-        message.from_user.id,
-        message.from_user.username,
-    )
-
-    # Ask for feedback if rating is low
-    low_rating_feedback = await ask_low_rating_feedback(
-        message,
-        state,
-        app,
-        "еде и напитках",
-        food_rating,
-        message.from_user.id,
-        message.from_user.username,
-    )
-    if low_rating_feedback:
-        feedback_data["food_feedback"] = low_rating_feedback
-
-    # Step 6: Ask entertainment rating
-    entertainment_rating = await ask_user_choice(
-        message.chat.id,
-        "Насколько понравились развлекательные мероприятия?\n\n"
-        "1 - в следующей раз не буду участвовать ни за какие коврижки\n"
-        "5 - только ради них можно было приходить!",
-        choices={
-            "1": "1",
-            "2": "2",
-            "3": "3",
-            "4": "4",
-            "5": "5",
-            "skip": "Пропустить вопрос",
-            "cancel": "Отмена",
-        },
-        default_choice="cancel",
-        state=state,
-        timeout=None,
-        highlight_default=False,
-        columns=5,
-    )
-
-    if entertainment_rating == "cancel":
-        # Save feedback data and thank the user
-        await save_feedback_and_thank(
-            message,
-            state,
-            app,
-            feedback_data,
-            is_cancel=True,
-        )
-        return
-
-    if entertainment_rating == "skip":
-        entertainment_rating = None
-        await send_safe(message.chat.id, "Спасибо! Вопрос пропущен.")
-
-    feedback_data["entertainment_rating"] = entertainment_rating
-
-    # Log entertainment rating
-    await app.save_event_log(
-        "feedback",
-        {
-            "type": "entertainment_rating",
-            "rating": entertainment_rating,
-            "city": city,
-        },
-        message.from_user.id,
-        message.from_user.username,
-    )
-
-    # Ask for feedback if rating is low
-    low_rating_feedback = await ask_low_rating_feedback(
-        message,
-        state,
-        app,
-        "развлекательных мероприятиях",
-        entertainment_rating,
-        message.from_user.id,
-        message.from_user.username,
-    )
-    if low_rating_feedback:
-        feedback_data["entertainment_feedback"] = low_rating_feedback
-
-    # Step 7: Ask if willing to help organize next year
+async def _ask_help_interest(
+    message, state, app: App, feedback_data: dict, city, user_id: int, username
+) -> bool:
+    """Ask willingness to help organize. Returns False on cancel."""
     help_interest = await ask_user_choice(
         message.chat.id,
         "Ты готов был бы помогать в организации встрече в твоем городе весной 2026?\n\n"
@@ -570,15 +290,8 @@ async def feedback_handler(message: Message, state: FSMContext, app: App):
     )
 
     if help_interest == "cancel":
-        # Save feedback data and thank the user
-        await save_feedback_and_thank(
-            message,
-            state,
-            app,
-            feedback_data,
-            is_cancel=True,
-        )
-        return
+        await save_feedback_and_thank(message, state, app, feedback_data, is_cancel=True)
+        return False
 
     if help_interest == "skip":
         help_interest = None
@@ -586,41 +299,39 @@ async def feedback_handler(message: Message, state: FSMContext, app: App):
 
     feedback_data["help_interest"] = help_interest
 
-    # Log willingness to help
     await app.save_event_log(
         "feedback",
-        {
-            "type": "willing_to_help",
-            "response": help_interest,
-            "city": city,
-        },
-        message.from_user.id,
-        message.from_user.username,
+        {"type": "willing_to_help", "response": help_interest, "city": city},
+        user_id,
+        username,
     )
+    return True
 
-    # Step 8: Ask for specific comments
-    comments_text = None
+
+async def _ask_comments(message, state, feedback_data: dict) -> None:
+    """Ask for free-text comments and store in feedback_data."""
     comments = await ask_user_choice_raw(
         message.chat.id,
         "Если хочешь написать что-то, что мы не включили в опрос, напиши ниже",
-        choices={
-            "skip": "Пропустить вопрос",
-        },
+        choices={"skip": "Пропустить вопрос"},
         state=state,
         timeout=None,
     )
 
+    comments_text = None
     if comments and isinstance(comments, str):
-        # Button was clicked
         if comments == "skip":
             await send_safe(message.chat.id, "Спасибо! Вопрос пропущен.")
     elif comments and comments.text:
-        # User sent a text message
         comments_text = comments.text
 
     feedback_data["comments"] = comments_text
 
-    # Step 9: Ask about feedback format preference
+
+async def _ask_feedback_format(
+    message, state, app: App, feedback_data: dict, user_id: int, username
+) -> bool:
+    """Ask preferred feedback format. Returns False on cancel."""
     feedback_format = await ask_user_choice(
         message.chat.id,
         "Как удобнее заполнять обратную связь?",
@@ -638,15 +349,8 @@ async def feedback_handler(message: Message, state: FSMContext, app: App):
     )
 
     if feedback_format == "cancel":
-        # Save feedback data and thank the user
-        await save_feedback_and_thank(
-            message,
-            state,
-            app,
-            feedback_data,
-            is_cancel=True,
-        )
-        return
+        await save_feedback_and_thank(message, state, app, feedback_data, is_cancel=True)
+        return False
 
     if feedback_format == "skip":
         feedback_format = None
@@ -654,21 +358,169 @@ async def feedback_handler(message: Message, state: FSMContext, app: App):
 
     feedback_data["feedback_format_preference"] = feedback_format
 
-    # Log feedback format preference
     await app.save_event_log(
         "feedback",
-        {
-            "type": "feedback_format_preference",
-            "preference": feedback_format,
-        },
-        message.from_user.id,
-        message.from_user.username,
+        {"type": "feedback_format_preference", "preference": feedback_format},
+        user_id,
+        username,
+    )
+    return True
+
+
+@commands_menu.add_command("feedback", "Оставить отзыв о встрече выпускников")
+@router.message(Command("feedback"))
+async def feedback_handler(message: Message, state: FSMContext, app: App):
+    """Handle user feedback for alumni meetup"""
+    if message.from_user is None:
+        logger.error("Message from_user is None")
+        return
+
+    user_data = await app.collection.find_one({"user_id": message.from_user.id})
+    full_name = user_data.get("full_name") if user_data else None
+
+    feedback_data = {
+        "user_id": message.from_user.id,
+        "username": message.from_user.username,
+        "full_name": full_name,
+    }
+
+    await send_safe(
+        message.chat.id,
+        "Привет! \n"
+        "Я чат-бот, собираю обратную связь по встрече выпускников. \n\n"
+        "Благодаря в том числе и твоей обратной связи мы продолжаем улучшать наши мероприятия, "
+        "помоги нам пожалуйста, потрать 4 минуты :)",
     )
 
-    # Save all feedback and thank the user using the helper function
-    await save_feedback_and_thank(
-        message,
-        state,
-        app,
-        feedback_data,
+    if app.settings.delay_messages:
+        await asyncio.sleep(5)
+
+    # Step 1: attended?
+    attendance = await ask_user_choice(
+        message.chat.id,
+        "Ты был на встрече выпускников?",
+        choices={"yes": "Да", "no": "Нет", "cancel": "Отмена опроса"},
+        state=state,
+        timeout=None,
+        columns=2,
+        default_choice="cancel",
+        highlight_default=False,
     )
+
+    if attendance == "cancel":
+        await save_feedback_and_thank(message, state, app, feedback_data, is_cancel=True)
+        return
+
+    feedback_data["attended"] = attendance == "yes"
+
+    if not feedback_data["attended"]:
+        await save_feedback_and_thank(message, state, app, feedback_data)
+        return
+
+    # Step 2: city
+    city, should_continue = await _ask_attended_city(message, state, app, feedback_data)
+    if not should_continue:
+        return
+
+    feedback_data["city"] = city
+    user_id = message.from_user.id
+    username = message.from_user.username
+
+    await app.save_event_log(
+        "feedback",
+        {"type": "city_selection", "city": city},
+        user_id,
+        username,
+    )
+
+    # Step 3: recommendation
+    ok = await _ask_rating_step(
+        message, state, app, feedback_data,
+        question=(
+            "Круто! Насколько ты бы порекомендовал своим одноклассникам участвовать в следующем году?\n\n"
+            "1 - лучше заняться чем-то другим\n"
+            "2 - зайти на полчаса\n"
+            "3 - посидеть пару часов с одноклассниками поговорить\n"
+            "4 - посидеть до закрытия - познакомиться с другими поколениями выпускников\n"
+            "5 - моя бы воля - сделали бы afterparty до последнего танцующего!"
+        ),
+        log_type="recommendation_level",
+        data_key="recommendation_level",
+        feedback_key="recommendation_feedback",
+        low_rating_label="общей рекомендации",
+        city=city,
+        user_id=user_id,
+        username=username,
+    )
+    if not ok:
+        return
+
+    # Step 4: venue
+    ok = await _ask_rating_step(
+        message, state, app, feedback_data,
+        question=(
+            "Насколько тебе понравилась площадка?\n\n"
+            "1 - совсем не понравилась\n"
+            "5 - супер, обязательно в этом же месте в следующем году!"
+        ),
+        log_type="venue_rating",
+        data_key="venue_rating",
+        feedback_key="venue_feedback",
+        low_rating_label="площадке",
+        city=city,
+        user_id=user_id,
+        username=username,
+    )
+    if not ok:
+        return
+
+    # Step 5: food
+    ok = await _ask_rating_step(
+        message, state, app, feedback_data,
+        question=(
+            "Насколько понравилась еда и напитки?\n\n"
+            "1 - несъедобно\n"
+            "5 - каждый бы день так есть и пить!"
+        ),
+        log_type="food_rating",
+        data_key="food_rating",
+        feedback_key="food_feedback",
+        low_rating_label="еде и напитках",
+        city=city,
+        user_id=user_id,
+        username=username,
+    )
+    if not ok:
+        return
+
+    # Step 6: entertainment
+    ok = await _ask_rating_step(
+        message, state, app, feedback_data,
+        question=(
+            "Насколько понравились развлекательные мероприятия?\n\n"
+            "1 - в следующей раз не буду участвовать ни за какие коврижки\n"
+            "5 - только ради них можно было приходить!"
+        ),
+        log_type="entertainment_rating",
+        data_key="entertainment_rating",
+        feedback_key="entertainment_feedback",
+        low_rating_label="развлекательных мероприятиях",
+        city=city,
+        user_id=user_id,
+        username=username,
+    )
+    if not ok:
+        return
+
+    # Step 7: help interest
+    if not await _ask_help_interest(message, state, app, feedback_data, city, user_id, username):
+        return
+
+    # Step 8: comments
+    await _ask_comments(message, state, feedback_data)
+
+    # Step 9: feedback format
+    if not await _ask_feedback_format(message, state, app, feedback_data, user_id, username):
+        return
+
+    await save_feedback_and_thank(message, state, app, feedback_data)

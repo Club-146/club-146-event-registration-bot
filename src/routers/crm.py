@@ -64,6 +64,110 @@ def apply_message_templates(
     return result
 
 
+_TEMPLATE_MARKERS = [
+    "{name}", "{city}", "{city_padezh}", "{address}", "{venue}", "{time}", "{year}", "{class}",
+]
+
+
+async def _get_notify_users(app: App, audience: str, city_filter) -> tuple:
+    """Fetch the target user list and a display name for the audience."""
+    if audience == "unpaid":
+        users = await app.get_unpaid_users(event_id=city_filter)
+        audience_name = "не оплативших пользователей"
+    elif audience == "paid":
+        users = await app.get_paid_users(event_id=city_filter)
+        audience_name = "оплативших пользователей"
+    else:
+        users = await app.get_all_users(event_id=city_filter)
+        audience_name = "всех пользователей"
+    return users, audience_name
+
+
+def _resolve_city_name(city: str, event_map: dict) -> str:
+    if city == "all" or not city:
+        return "всех городах"
+    if city in event_map:
+        return event_map[city].get("city_prepositional", event_map[city].get("city", city))
+    return city
+
+
+async def _build_notify_preview(
+    app: App, users: list, audience_name: str, city_name: str, notification_text: str
+) -> str:
+    preview = f"📊 Найдено {len(users)} {audience_name} в {city_name}:\n\n"
+    for i, user in enumerate(users[:10], 1):
+        uname = user.get("username", "без имени")
+        uid = user.get("user_id", "??")
+        full_name = user.get("full_name", "Имя не указано")
+        user_city = user.get("target_city", "Город не указан")
+        preview += f"{i}. {full_name} (@{uname or uid})\n"
+        preview += f"   🏙️ {user_city}\n"
+    if len(users) > 10:
+        preview += f"\n... и еще {len(users) - 10} пользователей"
+
+    preview += "\n\n<b>Предварительный просмотр сообщения:</b>\n\n"
+    preview += notification_text
+
+    if users and any(m in notification_text for m in _TEMPLATE_MARKERS):
+        example_user = users[0]
+        example_event = await app.get_event_for_registration(example_user)
+        personalized_example = apply_message_templates(notification_text, example_user, example_event)
+        preview += "\n\n<b>Пример персонализированного сообщения для пользователя:</b>\n"
+        preview += f"<i>{example_user.get('full_name', '')}</i>\n\n"
+        preview += personalized_example
+
+    return preview
+
+
+def _build_validation_report(
+    users: list, initiator, audience_name: str, city_name: str, notification_text: str
+) -> str:
+    report = "📢 <b>МАССОВАЯ РАССЫЛКА ЗАПУЩЕНА</b>\n\n"
+    report += f"👤 Инициатор: {initiator}\n"
+    report += f"🎯 Целевая аудитория: {len(users)} пользователей\n"
+    report += f"🏙️ Город: {city_name}\n"
+    report += f"💰 Категория: {audience_name}\n\n"
+    report += "🗒️ <b>Список получателей:</b>\n"
+    for i, user in enumerate(users[:20], 1):
+        uname = user.get("username", "без имени")
+        uid = user.get("user_id", "??")
+        full_name = user.get("full_name", "Имя не указано")
+        city = user.get("target_city", "Город не указан")
+        report += f"{i}. {full_name} (@{uname or uid}) - {city}\n"
+    if len(users) > 20:
+        report += f"...и еще {len(users) - 20} пользователей\n"
+    report += "\n📋 <b>Шаблон сообщения:</b>\n"
+    report += notification_text
+    return report
+
+
+async def _send_notify_messages(
+    app: App, users: list, notification_text: str
+) -> tuple:
+    sent_count = 0
+    failed_count = 0
+    for user in users:
+        user_id = user.get("user_id")
+        if not user_id:
+            failed_count += 1
+            continue
+        try:
+            user_event = await app.get_event_for_registration(user)
+            personalized_text = apply_message_templates(notification_text, user, user_event)
+            await send_safe(user_id, personalized_text)
+            sent_count += 1
+            validation_message = (
+                f"✅ Уведомление отправлено пользователю {user.get('full_name')} "
+                f"(@{user.get('username') or user_id})\n🏙️ "
+                f"{user.get('target_city', 'Город не указан')}"
+            )
+            await app.log_to_chat(validation_message, "events")
+        except Exception as e:
+            logger.error(f"Failed to send notification to user {user_id}: {e}")
+            failed_count += 1
+    return sent_count, failed_count
+
+
 @commands_menu.add_command(
     "notify", "Отправить уведомление пользователям", visibility=Visibility.ADMIN_ONLY
 )
@@ -74,7 +178,7 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
         await send_safe(message.chat.id, "❌ Ошибка: не удалось определить отправителя")
         return
 
-    # Step 1: Select audience (unpaid, paid, or everybody)
+    # Step 1: audience
     audience = await ask_user_choice(
         message.chat.id,
         "Шаг 1: Кому отправить уведомление?",
@@ -87,19 +191,14 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
         state=state,
         timeout=None,
     )
-
     if audience == "cancel":
         await send_safe(message.chat.id, "Операция отменена")
         return
 
-    # Step 2: Select city (from enabled events)
-    city_choices = {
-        "all": "Все города",
-        "cancel": "Отмена",
-    }
-
+    # Step 2: city
+    city_choices = {"all": "Все города", "cancel": "Отмена"}
     enabled_events = await app.get_enabled_events()
-    event_map = {}  # event_id -> event dict for later lookup
+    event_map = {}
     for ev in enabled_events:
         event_id = str(ev["_id"])
         city_choices[event_id] = ev.get("city", "Unknown")
@@ -112,12 +211,11 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
         state=state,
         timeout=None,
     )
-
     if city == "cancel":
         await send_safe(message.chat.id, "Операция отменена")
         return
 
-    # Step 3: Enter text to be sent
+    # Step 3: message text
     response = await ask_user_raw(
         message.chat.id,
         "Шаг 3: Введите текст сообщения для отправки\n\n"
@@ -134,185 +232,133 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
         state=state,
         timeout=None,
     )
-
     if not response or not response.html_text:
         await send_safe(message.chat.id, "Операция отменена")
         return
 
     notification_text = response.html_text
-
     if notification_text.lower() == "отмена":
         await send_safe(message.chat.id, "Операция отменена")
         return
 
-    # Show processing message
-    status_msg = await send_safe(
-        message.chat.id, "⏳ Получение списка пользователей..."
-    )
+    status_msg = await send_safe(message.chat.id, "⏳ Получение списка пользователей...")
 
-    # Get appropriate user list
     city_filter = city if city != "all" else None
-    if audience == "unpaid":
-        users = await app.get_unpaid_users(event_id=city_filter)
-        audience_name = "не оплативших пользователей"
-    elif audience == "paid":
-        users = await app.get_paid_users(event_id=city_filter)
-        audience_name = "оплативших пользователей"
-    else:  # all
-        users = await app.get_all_users(event_id=city_filter)
-        audience_name = "всех пользователей"
+    users, audience_name = await _get_notify_users(app, audience, city_filter)
 
-    # Check if we have users matching criteria
     if not users:
-        await status_msg.edit_text(
-            "❌ Пользователи, соответствующие критериям, не найдены!"
-        )
+        await status_msg.edit_text("❌ Пользователи, соответствующие критериям, не найдены!")
         return
 
-    # Format city for display
-    if city == "all" or not city:
-        city_name = "всех городах"
-    elif city in event_map:
-        city_name = event_map[city].get(
-            "city_prepositional", event_map[city].get("city", city)
-        )
-    else:
-        city_name = city
-
-    # Generate preview report
-    preview = f"📊 Найдено {len(users)} {audience_name} в {city_name}:\n\n"
-
-    # Show a preview of up to 10 users
-    for i, user in enumerate(users[:10], 1):
-        username = user.get("username", "без имени")
-        user_id = user.get("user_id", "??")
-        full_name = user.get("full_name", "Имя не указано")
-        user_city = user.get("target_city", "Город не указан")
-
-        preview += f"{i}. {full_name} (@{username or user_id})\n"
-        preview += f"   🏙️ {user_city}\n"
-
-    if len(users) > 10:
-        preview += f"\n... и еще {len(users) - 10} пользователей"
-
-    # Message preview with personalization example
-    preview += "\n\n<b>Предварительный просмотр сообщения:</b>\n\n"
-    preview += notification_text
-
-    # Define all available template markers
-    template_markers = [
-        "{name}",
-        "{city}",
-        "{city_padezh}",
-        "{address}",
-        "{venue}",
-        "{time}",
-        "{year}",
-        "{class}",
-    ]
-
-    # If we have users and there are templates in the message, show a personalized example
-    if users and any(marker in notification_text for marker in template_markers):
-        example_user = users[0]  # Take the first user for the example
-
-        # Look up event for this user
-        example_event = await app.get_event_for_registration(example_user)
-        # Create a personalized example using our utility function
-        personalized_example = apply_message_templates(
-            notification_text, example_user, example_event
-        )
-
-        preview += (
-            "\n\n<b>Пример персонализированного сообщения для пользователя:</b>\n"
-        )
-        preview += f"<i>{example_user.get('full_name', '')}</i>\n\n"
-        preview += personalized_example
-
-    # Update status message with preview
+    city_name = _resolve_city_name(city, event_map)
+    preview = await _build_notify_preview(app, users, audience_name, city_name, notification_text)
     await status_msg.edit_text(preview)
 
-    # Step 4: Ask for final confirmation
+    # Step 4: confirm
     confirm = await ask_user_confirmation(
         message.chat.id,
         f"Шаг 4: ⚠️ Вы собираетесь отправить сообщение {len(users)} пользователям. Продолжить?",
         state=state,
     )
-
     if not confirm:
         await send_safe(message.chat.id, "Операция отменена")
         return
 
-    # First send a detailed report to the validation chat
-    validation_report = "📢 <b>МАССОВАЯ РАССЫЛКА ЗАПУЩЕНА</b>\n\n"
-    validation_report += (
-        f"👤 Инициатор: {message.from_user.username or message.from_user.id}\n"
-    )
-    validation_report += f"🎯 Целевая аудитория: {len(users)} пользователей\n"
-    validation_report += f"🏙️ Город: {city_name}\n"
-    validation_report += f"💰 Категория: {audience_name}\n\n"
-    validation_report += "🗒️ <b>Список получателей:</b>\n"
-
-    # Add a list of users (limited to avoid oversized message)
-    for i, user in enumerate(users[:20], 1):
-        username = user.get("username", "без имени")
-        user_id = user.get("user_id", "??")
-        full_name = user.get("full_name", "Имя не указано")
-        city = user.get("target_city", "Город не указан")
-        validation_report += f"{i}. {full_name} (@{username or user_id}) - {city}\n"
-
-    if len(users) > 20:
-        validation_report += f"...и еще {len(users) - 20} пользователей\n"
-
-    # Add template text to the report
-    validation_report += "\n📋 <b>Шаблон сообщения:</b>\n"
-    validation_report += notification_text
-
-    # Send report to validation chat before starting the actual notifications
+    initiator = message.from_user.username or message.from_user.id
+    validation_report = _build_validation_report(users, initiator, audience_name, city_name, notification_text)
     await app.log_to_chat(validation_report, "events")
 
-    # Send notifications
-    sent_count = 0
-    failed_count = 0
-
     status_msg = await send_safe(message.chat.id, "⏳ Отправка уведомлений...")
+    sent_count, failed_count = await _send_notify_messages(app, users, notification_text)
 
-    for user in users:
-        user_id = user.get("user_id")
-        if not user_id:
-            failed_count += 1
-            continue
-
-        try:
-            # Look up event for this user's registration
-            user_event = await app.get_event_for_registration(user)
-            # Process templates for this user using our utility function
-            personalized_text = apply_message_templates(
-                notification_text, user, user_event
-            )
-
-            await send_safe(user_id, personalized_text)
-            sent_count += 1
-
-            # Notify validation chat about sent message
-            validation_message = (
-                f"✅ Уведомление отправлено пользователю {user.get('full_name')} "
-                f"(@{user.get('username') or user_id})\n🏙️ "
-                f"{user.get('target_city', 'Город не указан')}"
-            )
-            await app.log_to_chat(validation_message, "events")
-        except Exception as e:
-            logger.error(f"Failed to send notification to user {user_id}: {e}")
-            failed_count += 1
-
-    # Update status message with results
-    result_text = (
+    await status_msg.edit_text(
         f"✅ Уведомления отправлены!\n\n"
         f"📊 Статистика:\n"
         f"- Успешно отправлено: {sent_count}\n"
         f"- Ошибок: {failed_count}"
     )
 
-    await status_msg.edit_text(result_text)
+
+async def _build_recipient_list(app, audience: str, city_filter: str, event_map: dict) -> list:
+    """Resolve the list of target user IDs for announce_new_season_handler."""
+    if audience == "all_time":
+        if city_filter == "all":
+            active_ids = set(await app.collection.distinct("user_id"))
+            deleted_ids = set(await app.deleted_users.distinct("user_id"))
+            return list(active_ids | deleted_ids)
+        ev = event_map.get(city_filter, {})
+        city = ev.get("city", "")
+        active_ids = set(await app.collection.distinct("user_id", {"target_city": city}))
+        deleted_ids = set(await app.deleted_users.distinct("user_id", {"target_city": city}))
+        return list(active_ids | deleted_ids)
+    # current
+    if city_filter == "all":
+        return await app.collection.distinct("user_id")
+    return await app.collection.distinct("user_id", {"event_id": city_filter})
+
+
+def _build_default_announcement(enabled_events: list, post_link: str) -> str:
+    cities = [ev.get("city", "?") for ev in enabled_events]
+    cities_str = ", ".join(cities)
+    events_list = ""
+    for ev in enabled_events:
+        venue = ev.get("venue") or "Уточняется"
+        address = ev.get("address") or ""
+        venue_line = venue + (f", {address}" if address else "")
+        events_list += (
+            f"🏙️ {ev.get('city', '?')} ({ev.get('date_display', '?')})\n"
+            f"   📍 {venue_line}\n"
+        )
+    msg = f"Встречи 146 — {cities_str} — приходи!\n\n{events_list}\n"
+    if post_link:
+        msg += f"Регистрация открыта — детали тут:\n{post_link}\n\n"
+    msg += "Чтобы зарегистрироваться, напиши боту /start"
+    return msg
+
+
+async def _get_announcement_text(
+    message, state, default_message: str
+) -> Optional[str]:
+    """Ask user to keep default message or enter a custom one. Returns text or None on cancel."""
+    custom_resp = await ask_user_choice(
+        message.chat.id,
+        f"Шаг 4: Текст сообщения:\n\n{default_message}\n\nИспользовать этот текст или написать свой?",
+        choices={
+            "use_default": "Использовать этот текст",
+            "custom": "Написать свой текст",
+            "cancel": "Отмена",
+        },
+        state=state,
+        timeout=None,
+    )
+    if custom_resp == "cancel":
+        await send_safe(message.chat.id, "Операция отменена.")
+        return None
+    if custom_resp == "custom":
+        text_resp = await ask_user_raw(
+            message.chat.id,
+            "Введите текст сообщения (поддерживается HTML):",
+            state=state,
+            timeout=None,
+        )
+        if not text_resp or not text_resp.html_text:
+            await send_safe(message.chat.id, "Операция отменена.")
+            return None
+        return text_resp.html_text
+    return default_message
+
+
+async def _send_announcements(users_ids: list, announcement_text: str) -> tuple:
+    sent_count = 0
+    failed_count = 0
+    for uid in users_ids:
+        try:
+            await send_safe(uid, announcement_text)
+            sent_count += 1
+        except Exception as e:
+            logger.error(f"Failed to send season announcement to user {uid}: {e}")
+            failed_count += 1
+    return sent_count, failed_count
 
 
 async def announce_new_season_handler(message: Message, state: FSMContext, app: App):
@@ -321,7 +367,6 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
         await send_safe(message.chat.id, "❌ Ошибка: не удалось определить отправителя")
         return
 
-    # Get upcoming events for context
     enabled_events = await app.get_enabled_events()
     if not enabled_events:
         await send_safe(
@@ -330,13 +375,12 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
         )
         return
 
-    # Show current events for reference
     events_preview = "📅 Текущие активные встречи:\n"
     for ev in enabled_events:
         events_preview += f"  • {ev.get('city', '?')} ({ev.get('date_display', '?')})\n"
     await send_safe(message.chat.id, events_preview)
 
-    # Step 1: Select audience scope
+    # Step 1: audience scope
     audience = await ask_user_choice(
         message.chat.id,
         "Шаг 1: Кому отправить анонс?",
@@ -348,12 +392,11 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
         state=state,
         timeout=None,
     )
-
     if audience == "cancel":
         await send_safe(message.chat.id, "Операция отменена.")
         return
 
-    # Step 2: Select city/event filter
+    # Step 2: city/event filter
     city_choices: Dict[str, Any] = {"all": "Все города / встречи", "cancel": "Отмена"}
     event_map = {}
     for ev in enabled_events:
@@ -368,42 +411,16 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
         state=state,
         timeout=None,
     )
-
     if city_filter == "cancel":
         await send_safe(message.chat.id, "Операция отменена.")
         return
 
-    # Build recipient list based on selections
-    if audience == "all_time":
-        if city_filter == "all":
-            # All unique user IDs from all registrations (current + deleted)
-            active_ids = set(await app.collection.distinct("user_id"))
-            deleted_ids = set(await app.deleted_users.distinct("user_id"))
-            target_user_ids = list(active_ids | deleted_ids)
-        else:
-            # All-time users for a specific event's city
-            ev = event_map.get(city_filter, {})
-            city = ev.get("city", "")
-            active_ids = set(
-                await app.collection.distinct("user_id", {"target_city": city})
-            )
-            deleted_ids = set(
-                await app.deleted_users.distinct("user_id", {"target_city": city})
-            )
-            target_user_ids = list(active_ids | deleted_ids)
-    else:  # current
-        if city_filter == "all":
-            target_user_ids = await app.collection.distinct("user_id")
-        else:
-            target_user_ids = await app.collection.distinct(
-                "user_id", {"event_id": city_filter}
-            )
-
+    target_user_ids = await _build_recipient_list(app, audience, city_filter, event_map)
     if not target_user_ids:
         await send_safe(message.chat.id, "❌ Нет пользователей для рассылки.")
         return
 
-    # Step 3: Ask for link
+    # Step 3: link
     link_resp = await ask_user_raw(
         message.chat.id,
         "Шаг 3: Введите ссылку на пост (или 'нет' чтобы пропустить):",
@@ -414,68 +431,19 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
     if link_resp and link_resp.text and link_resp.text.strip().lower() != "нет":
         post_link = link_resp.text.strip()
 
-    # Build default message
-    cities = [ev.get("city", "?") for ev in enabled_events]
-    cities_str = ", ".join(cities)
+    default_message = _build_default_announcement(enabled_events, post_link)
 
-    events_list = ""
-    for ev in enabled_events:
-        venue = ev.get("venue") or "Уточняется"
-        address = ev.get("address") or ""
-        venue_line = venue
-        if address:
-            venue_line += f", {address}"
-        events_list += (
-            f"🏙️ {ev.get('city', '?')} ({ev.get('date_display', '?')})\n"
-            f"   📍 {venue_line}\n"
-        )
-
-    default_message = f"Встречи 146 — {cities_str} — приходи!\n\n{events_list}\n"
-    if post_link:
-        default_message += f"Регистрация открыта — детали тут:\n{post_link}\n\n"
-    default_message += "Чтобы зарегистрироваться, напиши боту /start"
-
-    # Step 4: Choose or write message text
-    custom_resp = await ask_user_choice(
-        message.chat.id,
-        f"Шаг 4: Текст сообщения:\n\n{default_message}\n\nИспользовать этот текст или написать свой?",
-        choices={
-            "use_default": "Использовать этот текст",
-            "custom": "Написать свой текст",
-            "cancel": "Отмена",
-        },
-        state=state,
-        timeout=None,
-    )
-
-    if custom_resp == "cancel":
-        await send_safe(message.chat.id, "Операция отменена.")
+    # Step 4: text
+    announcement_text = await _get_announcement_text(message, state, default_message)
+    if announcement_text is None:
         return
 
-    if custom_resp == "custom":
-        text_resp = await ask_user_raw(
-            message.chat.id,
-            "Введите текст сообщения (поддерживается HTML):",
-            state=state,
-            timeout=None,
-        )
-        if not text_resp or not text_resp.html_text:
-            await send_safe(message.chat.id, "Операция отменена.")
-            return
-        announcement_text = text_resp.html_text
-    else:
-        announcement_text = default_message
-
-    # Format audience description for confirmation
     audience_desc = (
-        "все пользователи за всё время"
-        if audience == "all_time"
-        else "текущие зарегистрированные"
+        "все пользователи за всё время" if audience == "all_time" else "текущие зарегистрированные"
     )
     if city_filter != "all" and city_filter in event_map:
         audience_desc += f" ({event_map[city_filter].get('city', city_filter)})"
 
-    # Confirm before sending
     confirm = await ask_user_confirmation(
         message.chat.id,
         f"⚠️ Отправить анонс {len(target_user_ids)} пользователям?\n"
@@ -483,12 +451,10 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
         f"Текст:\n{announcement_text}",
         state=state,
     )
-
     if not confirm:
         await send_safe(message.chat.id, "Операция отменена.")
         return
 
-    # Log to validation chat
     await app.log_to_chat(
         f"📢 <b>АНОНС НОВОГО СЕЗОНА</b>\n\n"
         f"👤 Инициатор: {message.from_user.username or message.from_user.id}\n"
@@ -498,18 +464,8 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
         "events",
     )
 
-    # Send to all users
     status_msg = await send_safe(message.chat.id, "⏳ Отправка анонса...")
-    sent_count = 0
-    failed_count = 0
-
-    for uid in target_user_ids:
-        try:
-            await send_safe(uid, announcement_text)
-            sent_count += 1
-        except Exception as e:
-            logger.error(f"Failed to send season announcement to user {uid}: {e}")
-            failed_count += 1
+    sent_count, failed_count = await _send_announcements(target_user_ids, announcement_text)
 
     await status_msg.edit_text(
         f"✅ Анонс отправлен!\n\n"

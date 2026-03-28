@@ -292,13 +292,162 @@ def _format_deleted_payment_block(stat, PAYMENT_STATUS_MAP):
     return "\n".join(lines)
 
 
+def _extract_active_counts(active_stat) -> dict:
+    """Extract status counts from an active payment stat dict (or zeros)."""
+    return {
+        "confirmed": active_stat["confirmed_count"] if active_stat else 0,
+        "pending": active_stat["pending_count"] if active_stat else 0,
+        "declined": active_stat["declined_count"] if active_stat else 0,
+        "unpaid": active_stat["unpaid_count"] if active_stat else 0,
+        "paid": active_stat["total_paid"] if active_stat else 0,
+    }
+
+
+def _extract_deleted_counts(deleted_stat) -> dict:
+    """Extract status counts from a deleted payment stat dict (or zeros)."""
+    return {
+        "confirmed": deleted_stat["confirmed_count"] if deleted_stat else 0,
+        "pending": deleted_stat["pending_count"] if deleted_stat else 0,
+        "paid": deleted_stat["total_paid"] if deleted_stat else 0,
+    }
+
+
+def _format_simple_totals(totals: dict, PAYMENT_STATUS_MAP) -> list:
+    """Format global totals section for _format_simple_payment_section."""
+    lines = ["\n<b>Всего по статусам:</b>", "<u>Активные пользователи:</u>"]
+    lines.append(f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{totals['active_confirmed']}</b>")
+    lines.append(f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{totals['active_pending']}</b>")
+    not_paid = totals['active_declined'] + totals['active_unpaid']
+    lines.append(f"⚪️ {PAYMENT_STATUS_MAP[None]}: <b>{not_paid}</b>")
+
+    if totals['deleted_confirmed'] > 0 or totals['deleted_pending'] > 0:
+        lines.append("\n<u>Удаленные пользователи с оплатами:</u>")
+        if totals['deleted_confirmed'] > 0:
+            lines.append(f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{totals['deleted_confirmed']}</b>")
+        if totals['deleted_pending'] > 0:
+            lines.append(f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{totals['deleted_pending']}</b>")
+
+    total_paid = totals['paid_active'] + totals['paid_deleted']
+    if total_paid > 0:
+        deleted_pct = f" ({totals['paid_deleted'] / total_paid:.1%} от удаленных)"
+        lines.append(f"\n<b>💵 Итого собрано: {total_paid:,} руб.</b>{deleted_pct}")
+    return lines
+
+
+def _format_city_payment_block_simple(
+    ac: dict, dc: dict, PAYMENT_STATUS_MAP
+) -> list:
+    """Format per-city lines for simple payment section."""
+    lines = []
+    total_active = ac["confirmed"] + ac["pending"] + ac["declined"] + ac["unpaid"]
+    if total_active > 0:
+        lines.append(f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{ac['confirmed']}</b>")
+        lines.append(f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{ac['pending']}</b>")
+        lines.append(f"⚪️ {PAYMENT_STATUS_MAP[None]}: <b>{ac['declined'] + ac['unpaid']}</b>")
+    else:
+        lines.append("Нет активных пользователей")
+
+    if dc["confirmed"] > 0 or dc["pending"] > 0:
+        lines.append("\n<u>Удаленные пользователи с оплатами:</u>")
+        if dc["confirmed"] > 0:
+            lines.append(f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{dc['confirmed']}</b>")
+        if dc["pending"] > 0:
+            lines.append(f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{dc['pending']}</b>")
+
+    if ac["paid"] > 0 or dc["paid"] > 0:
+        lines.append("\n<u>Суммы платежей:</u>")
+        if ac["paid"] > 0:
+            lines.append(f"💰 Активные: <b>{ac['paid']:,}</b> руб.")
+        if dc["paid"] > 0:
+            lines.append(f"💰 Удаленные: <b>{dc['paid']:,}</b> руб.")
+    return lines
+
+
+def _format_simple_payment_section(payment_stats_combined, event_name_map, PAYMENT_STATUS_MAP):
+    lines = ["<b>💰 Статусы оплат:</b>"]
+    totals = {
+        "active_confirmed": 0, "active_pending": 0,
+        "active_declined": 0, "active_unpaid": 0,
+        "deleted_confirmed": 0, "deleted_pending": 0,
+        "paid_active": 0, "paid_deleted": 0,
+    }
+
+    for eid, stats in sorted(
+        payment_stats_combined.items(),
+        key=lambda x: event_name_map.get(x[0], x[0] or ""),
+    ):
+        ac = _extract_active_counts(stats["active"])
+        dc = _extract_deleted_counts(stats["deleted"])
+
+        totals["active_confirmed"] += ac["confirmed"]
+        totals["active_pending"] += ac["pending"]
+        totals["active_declined"] += ac["declined"]
+        totals["active_unpaid"] += ac["unpaid"]
+        totals["deleted_confirmed"] += dc["confirmed"]
+        totals["deleted_pending"] += dc["pending"]
+        totals["paid_active"] += ac["paid"]
+        totals["paid_deleted"] += dc["paid"]
+
+        city_name = event_name_map.get(eid, eid or "Неизвестно")
+        lines.append(f"\n<b>{city_name}:</b>")
+        lines.extend(_format_city_payment_block_simple(ac, dc, PAYMENT_STATUS_MAP))
+
+    total_with_payment = sum([
+        totals["active_confirmed"], totals["active_pending"],
+        totals["active_declined"], totals["active_unpaid"],
+        totals["deleted_confirmed"], totals["deleted_pending"],
+    ])
+    if total_with_payment > 0:
+        lines.extend(_format_simple_totals(totals, PAYMENT_STATUS_MAP))
+
+    return "\n".join(lines)
+
+
+def _format_city_payment_block_full(
+    active_stat, deleted_stat, rf, rr, rd, PAYMENT_STATUS_MAP
+) -> list:
+    """Format per-city lines for full payment section."""
+    active_paid = active_stat["total_paid"] if active_stat else 0
+    deleted_paid = deleted_stat["total_paid"] if deleted_stat else 0
+    total_paid = active_paid + deleted_paid
+    deleted_note = f" (из них {deleted_paid:,} от удал.)" if deleted_paid > 0 else ""
+
+    lines = [
+        f"💵 Собрано: <b>{total_paid:,}</b> руб.{deleted_note}",
+        f"📊 Медиана % от формулы: <i>{get_median(rf):.1f}%</i>",
+        f"📊 Медиана % от регулярной: <i>{get_median(rr):.1f}%</i>",
+        f"📊 Медиана % от мин. со скидкой: <i>{get_median(rd):.1f}%</i>\n",
+        "<u>Статусы платежей (активные пользователи):</u>",
+        _format_payment_status_block(active_stat, PAYMENT_STATUS_MAP),
+        _format_deleted_payment_block(deleted_stat, PAYMENT_STATUS_MAP),
+    ]
+    return lines
+
+
+def _format_full_totals(
+    total_paid_active, total_paid_deleted,
+    all_ratios_formula, all_ratios_regular, all_ratios_discounted
+) -> list:
+    """Format global totals footer for full payment section."""
+    total_paid = total_paid_active + total_paid_deleted
+    if total_paid == 0:
+        return []
+    deleted_pct = f" ({total_paid_deleted / total_paid:.1%} от удаленных)"
+    return [
+        f"\n<b>💵 Итого собрано: {total_paid:,} руб.</b>{deleted_pct}",
+        f"📊 Общая медиана % от формулы: <i>{get_median(all_ratios_formula):.1f}%</i>",
+        f"📊 Общая медиана % от регулярной: <i>{get_median(all_ratios_regular):.1f}%</i>",
+        f"📊 Общая медиана % от мин. со скидкой: <i>{get_median(all_ratios_discounted):.1f}%</i>",
+    ]
+
+
 def _format_full_payment_section(payment_stats_combined, event_name_map, PAYMENT_STATUS_MAP):
     lines = ["<b>💰 Статистика оплат:</b>"]
     total_paid_active = 0
     total_paid_deleted = 0
-    all_ratios_formula = []
-    all_ratios_regular = []
-    all_ratios_discounted = []
+    all_ratios_formula: list = []
+    all_ratios_regular: list = []
+    all_ratios_discounted: list = []
 
     for eid, stats in sorted(
         payment_stats_combined.items(),
@@ -312,183 +461,22 @@ def _format_full_payment_section(payment_stats_combined, event_name_map, PAYMENT
         deleted_paid = deleted_stat["total_paid"] if deleted_stat else 0
         deleted_payments = deleted_stat["payments"] if deleted_stat else []
 
-        all_payments = active_payments + deleted_payments
-        rf, rr, rd = _compute_payment_ratios(all_payments)
+        rf, rr, rd = _compute_payment_ratios(active_payments + deleted_payments)
         all_ratios_formula.extend(rf)
         all_ratios_regular.extend(rr)
         all_ratios_discounted.extend(rd)
 
-        active_formula_total = sum(p["formula"] for p in active_payments)
-        active_regular_total = sum(p["regular"] for p in active_payments)
-        active_discounted_total = sum(p["discounted"] for p in active_payments)
-        deleted_formula_total = sum(p["formula"] for p in deleted_payments)
-        deleted_regular_total = sum(p["regular"] for p in deleted_payments)
-        deleted_discounted_total = sum(p["discounted"] for p in deleted_payments)
-
-        total_paid_active += active_paid
-        total_paid_deleted += deleted_paid
-
-        median_formula = get_median(rf)
-        median_regular = get_median(rr)
-        median_discounted = get_median(rd)
-
-        total_paid = active_paid + deleted_paid
-        deleted_note = f" (из них {deleted_paid:,} от удал.)" if deleted_paid > 0 else ""
-
-        city_name = event_name_map.get(eid, eid or "Неизвестно")
-        lines.append(f"\n<b>{city_name}:</b>")
-        lines.append(f"💵 Собрано: <b>{total_paid:,}</b> руб.{deleted_note}")
-        lines.append(f"📊 Медиана % от формулы: <i>{median_formula:.1f}%</i>")
-        lines.append(f"📊 Медиана % от регулярной: <i>{median_regular:.1f}%</i>")
-        lines.append(f"📊 Медиана % от мин. со скидкой: <i>{median_discounted:.1f}%</i>\n")
-        lines.append("<u>Статусы платежей (активные пользователи):</u>")
-        lines.append(_format_payment_status_block(active_stat, PAYMENT_STATUS_MAP))
-        lines.append(_format_deleted_payment_block(deleted_stat, PAYMENT_STATUS_MAP))
-
-    total_paid = total_paid_active + total_paid_deleted
-    if total_paid > 0:
-        deleted_percentage = (
-            f" ({total_paid_deleted / total_paid:.1%} от удаленных)"
-            if total_paid > 0
-            else ""
-        )
-        lines.append(f"\n<b>💵 Итого собрано: {total_paid:,} руб.</b>{deleted_percentage}")
-
-        total_median_formula = get_median(all_ratios_formula)
-        total_median_regular = get_median(all_ratios_regular)
-        total_median_discounted = get_median(all_ratios_discounted)
-
-        lines.append(
-            f"📊 Общая медиана % от формулы: <i>{total_median_formula:.1f}%</i>"
-        )
-        lines.append(
-            f"📊 Общая медиана % от регулярной: <i>{total_median_regular:.1f}%</i>"
-        )
-        lines.append(
-            f"📊 Общая медиана % от мин. со скидкой: <i>{total_median_discounted:.1f}%</i>"
-        )
-
-    return "\n".join(lines)
-
-
-def _format_simple_payment_section(payment_stats_combined, event_name_map, PAYMENT_STATUS_MAP):
-    lines = ["<b>💰 Статусы оплат:</b>"]
-    total_active_confirmed = 0
-    total_active_pending = 0
-    total_active_declined = 0
-    total_active_unpaid = 0
-    total_deleted_confirmed = 0
-    total_deleted_pending = 0
-    total_paid_active = 0
-    total_paid_deleted = 0
-
-    for eid, stats in sorted(
-        payment_stats_combined.items(),
-        key=lambda x: event_name_map.get(x[0], x[0] or ""),
-    ):
-        active_stat = stats["active"]
-        deleted_stat = stats["deleted"]
-
-        active_confirmed = active_stat["confirmed_count"] if active_stat else 0
-        active_pending = active_stat["pending_count"] if active_stat else 0
-        active_declined = active_stat["declined_count"] if active_stat else 0
-        active_unpaid = active_stat["unpaid_count"] if active_stat else 0
-        active_paid = active_stat["total_paid"] if active_stat else 0
-
-        deleted_confirmed = deleted_stat["confirmed_count"] if deleted_stat else 0
-        deleted_pending = deleted_stat["pending_count"] if deleted_stat else 0
-        deleted_paid = deleted_stat["total_paid"] if deleted_stat else 0
-
-        total_active_confirmed += active_confirmed
-        total_active_pending += active_pending
-        total_active_declined += active_declined
-        total_active_unpaid += active_unpaid
-        total_deleted_confirmed += deleted_confirmed
-        total_deleted_pending += deleted_pending
         total_paid_active += active_paid
         total_paid_deleted += deleted_paid
 
         city_name = event_name_map.get(eid, eid or "Неизвестно")
         lines.append(f"\n<b>{city_name}:</b>")
+        lines.extend(_format_city_payment_block_full(active_stat, deleted_stat, rf, rr, rd, PAYMENT_STATUS_MAP))
 
-        total_active_statuses = (
-            active_confirmed + active_pending + active_declined + active_unpaid
-        )
-        if total_active_statuses > 0:
-            lines.append(
-                f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{active_confirmed}</b>"
-            )
-            lines.append(
-                f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{active_pending}</b>"
-            )
-            lines.append(
-                f"⚪️ {PAYMENT_STATUS_MAP[None]}: <b>{active_declined + active_unpaid}</b>"
-            )
-        else:
-            lines.append("Нет активных пользователей")
-
-        if deleted_confirmed > 0 or deleted_pending > 0:
-            lines.append("\n<u>Удаленные пользователи с оплатами:</u>")
-            if deleted_confirmed > 0:
-                lines.append(
-                    f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{deleted_confirmed}</b>"
-                )
-            if deleted_pending > 0:
-                lines.append(
-                    f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{deleted_pending}</b>"
-                )
-
-        if active_paid > 0 or deleted_paid > 0:
-            lines.append("\n<u>Суммы платежей:</u>")
-            if active_paid > 0:
-                lines.append(f"💰 Активные: <b>{active_paid:,}</b> руб.")
-            if deleted_paid > 0:
-                lines.append(f"💰 Удаленные: <b>{deleted_paid:,}</b> руб.")
-
-    total_with_payment = (
-        total_active_confirmed
-        + total_active_pending
-        + total_active_declined
-        + total_active_unpaid
-        + total_deleted_confirmed
-        + total_deleted_pending
-    )
-
-    if total_with_payment > 0:
-        lines.append("\n<b>Всего по статусам:</b>")
-        lines.append("<u>Активные пользователи:</u>")
-        lines.append(
-            f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{total_active_confirmed}</b>"
-        )
-        lines.append(
-            f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{total_active_pending}</b>"
-        )
-        lines.append(
-            f"⚪️ {PAYMENT_STATUS_MAP[None]}: <b>{total_active_declined + total_active_unpaid}</b>"
-        )
-
-        if total_deleted_confirmed > 0 or total_deleted_pending > 0:
-            lines.append("\n<u>Удаленные пользователи с оплатами:</u>")
-            if total_deleted_confirmed > 0:
-                lines.append(
-                    f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{total_deleted_confirmed}</b>"
-                )
-            if total_deleted_pending > 0:
-                lines.append(
-                    f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{total_deleted_pending}</b>"
-                )
-
-        total_paid = total_paid_active + total_paid_deleted
-        if total_paid > 0:
-            deleted_percentage = (
-                f" ({total_paid_deleted / total_paid:.1%} от удаленных)"
-                if total_paid > 0
-                else ""
-            )
-            lines.append(
-                f"\n<b>💵 Итого собрано: {total_paid:,} руб.</b>{deleted_percentage}"
-            )
-
+    lines.extend(_format_full_totals(
+        total_paid_active, total_paid_deleted,
+        all_ratios_formula, all_ratios_regular, all_ratios_discounted,
+    ))
     return "\n".join(lines)
 
 

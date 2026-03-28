@@ -576,6 +576,101 @@ async def handle_cancel_option(response, message: Message, state: FSMContext) ->
 # ---- register_user step helpers ----
 
 
+async def _select_preselected_city(
+    message: Message, app: App, enabled_events: list,
+    preselected_city: str, user_id: int, username,
+):
+    """Handle the preselected-city branch. Returns (event, city) or (None, None)."""
+    selected_event = next(
+        (e for e in enabled_events if e["city"] == preselected_city or e["name"] == preselected_city),
+        None,
+    )
+    if selected_event and app.is_event_passed(selected_event):
+        await send_safe(
+            message.chat.id,
+            f"К сожалению, встреча в городе {preselected_city} уже прошла.\n\n"
+            "Вы можете:\n"
+            "1. Выбрать другой город, если там встреча еще не прошла\n"
+            "2. Следить за новостями в группе школы, чтобы не пропустить следующие встречи",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return None, None
+    log_msg = await app.log_registration_step(
+        user_id, username, "Выбор города", f"Предвыбранный город: {preselected_city}"
+    )
+    await _append_log(user_id, log_msg)
+    return selected_event, preselected_city
+
+
+async def _ask_city_choice(
+    message: Message, state: FSMContext, app: App,
+    enabled_events: list, existing_event_ids: List[str],
+    event_map: dict, user_id: int, username,
+):
+    """Ask the user to choose a city. Returns (event, location) or (None, None)."""
+    available_events = [
+        e for e in enabled_events
+        if not app.is_event_passed(e) and str(e["_id"]) not in existing_event_ids
+    ]
+
+    if not available_events:
+        await send_safe(
+            message.chat.id,
+            "К сожалению, все встречи уже прошли или вы уже зарегистрированы во всех доступных городах.\n\n"
+            "Следите за новостями в группе школы, чтобы не пропустить следующие встречи.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        log_msg = await app.log_registration_step(
+            user_id, username,
+            "Нет доступных городов",
+            "Пользователь уже зарегистрирован во всех городах или все встречи прошли",
+        )
+        await _append_log(user_id, log_msg)
+        return None, None
+
+    available_cities = {str(e["_id"]): f"{e['city']} ({e.get('date_display', '')})" for e in available_events}
+    available_cities["cancel"] = "Отменить регистрацию"
+
+    response = await ask_user_choice(
+        message.chat.id,
+        dedent("Выберите город, где планируете посетить встречу:"),
+        choices=available_cities,
+        state=state,
+        timeout=None,
+    )
+
+    if await handle_cancel_option(response, message, state):
+        return None, None
+
+    if response is None:
+        await send_safe(
+            message.chat.id,
+            "⏰ Время ожидания истекло. Пожалуйста, начните регистрацию заново с команды /start",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return None, None
+
+    selected_event = event_map.get(response)
+    location = selected_event["city"] if selected_event else response
+
+    log_msg = await app.log_registration_step(
+        user_id, username, "Выбор города", f"Выбранный город: {location}"
+    )
+    await app.save_event_log(
+        "registration_step",
+        {
+            "step": "city_selection",
+            "city": location,
+            "event_id": str(selected_event["_id"]) if selected_event else None,
+            "existing_event_ids": existing_event_ids,
+        },
+        user_id,
+        username,
+    )
+    await _append_log(user_id, log_msg)
+    return selected_event, location
+
+
 async def _select_event_for_registration(
     message: Message,
     state: FSMContext,
@@ -593,97 +688,13 @@ async def _select_event_for_registration(
     event_map = {str(e["_id"]): e for e in enabled_events}
 
     if preselected_city:
-        selected_event = next(
-            (
-                e
-                for e in enabled_events
-                if e["city"] == preselected_city or e["name"] == preselected_city
-            ),
-            None,
+        return await _select_preselected_city(
+            message, app, enabled_events, preselected_city, user_id, username
         )
-        if selected_event and app.is_event_passed(selected_event):
-            await send_safe(
-                message.chat.id,
-                f"К сожалению, встреча в городе {preselected_city} уже прошла.\n\n"
-                "Вы можете:\n"
-                "1. Выбрать другой город, если там встреча еще не прошла\n"
-                "2. Следить за новостями в группе школы, чтобы не пропустить следующие встречи",
-                reply_markup=ReplyKeyboardRemove(),
-            )
-            return None, None
-        log_msg = await app.log_registration_step(
-            user_id, username, "Выбор города", f"Предвыбранный город: {preselected_city}"
-        )
-        await _append_log(user_id, log_msg)
-        return selected_event, preselected_city
 
-    # No preselected city — ask user
-    available_events = [
-        e
-        for e in enabled_events
-        if not app.is_event_passed(e) and str(e["_id"]) not in existing_event_ids
-    ]
-
-    if not available_events:
-        await send_safe(
-            message.chat.id,
-            "К сожалению, все встречи уже прошли или вы уже зарегистрированы во всех доступных городах.\n\n"
-            "Следите за новостями в группе школы, чтобы не пропустить следующие встречи.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        log_msg = await app.log_registration_step(
-            user_id,
-            username,
-            "Нет доступных городов",
-            "Пользователь уже зарегистрирован во всех городах или все встречи прошли",
-        )
-        await _append_log(user_id, log_msg)
-        return None, None
-
-    available_cities = {}
-    for e in available_events:
-        eid = str(e["_id"])
-        available_cities[eid] = f"{e['city']} ({e.get('date_display', '')})"
-    available_cities["cancel"] = "Отменить регистрацию"
-
-    question = dedent("""
-        Выберите город, где планируете посетить встречу:
-        """)
-    response = await ask_user_choice(
-        message.chat.id, question, choices=available_cities, state=state, timeout=None
+    return await _ask_city_choice(
+        message, state, app, enabled_events, existing_event_ids, event_map, user_id, username
     )
-
-    if await handle_cancel_option(response, message, state):
-        return None, None
-
-    if response is None:
-        await send_safe(
-            message.chat.id,
-            "⏰ Время ожидания истекло. Пожалуйста, начните регистрацию заново с команды /start",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return None, None
-
-    selected_event = event_map.get(response)
-    location = selected_event["city"] if selected_event else response
-    city_name = location
-
-    log_msg = await app.log_registration_step(
-        user_id, username, "Выбор города", f"Выбранный город: {city_name}"
-    )
-    await app.save_event_log(
-        "registration_step",
-        {
-            "step": "city_selection",
-            "city": city_name,
-            "event_id": str(selected_event["_id"]) if selected_event else None,
-            "existing_event_ids": existing_event_ids,
-        },
-        user_id,
-        username,
-    )
-    await _append_log(user_id, log_msg)
-    return selected_event, location
 
 
 async def _collect_full_name(
@@ -1050,6 +1061,68 @@ async def _finalize_paid_registration(
     )
 
 
+def _get_city_prepositional(selected_event, location: str, reg_city_name: str) -> str:
+    if selected_event:
+        return selected_event.get("city_prepositional", reg_city_name)
+    if location:
+        from src.app import CITY_PREPOSITIONAL_MAP
+        return CITY_PREPOSITIONAL_MAP.get(location, location)
+    return ""
+
+
+async def _save_and_log_registration(
+    app: App,
+    message: Message,
+    state: FSMContext,
+    user_id: int,
+    username,
+    full_name: str,
+    graduation_year: int,
+    class_letter: str,
+    graduate_type,
+    selected_event,
+    location: str,
+    reg_city_name: str,
+    target_city_value: str,
+    guests: List[Dict],
+):
+    """Save the registered user record, guests, and all completion logs."""
+    event_id_for_db = str(selected_event["_id"]) if selected_event else ""
+
+    log_msg = await app.log_registration_step(
+        user_id,
+        username,
+        "Регистрация завершена",
+        f"Город: {reg_city_name}, ФИО: {full_name}, Выпуск: {graduation_year} {class_letter}, Гости: {len(guests)}",
+    )
+    await _append_log(user_id, log_msg)
+
+    await app.log_registration_completed(
+        user_id, username or "", full_name, graduation_year,
+        class_letter, reg_city_name, graduate_type.value, guests=guests,
+    )
+
+    await delete_log_messages(user_id)
+
+    if guests:
+        await app.save_registration_guests(user_id, event_id_for_db, guests)
+
+    city_prep = _get_city_prepositional(selected_event, location, reg_city_name)
+    date_display = get_event_date_display(selected_event) if selected_event else ""
+    event_is_free = is_event_free(selected_event, graduate_type.value) if selected_event else False
+
+    if event_is_free or graduate_type in (GraduateType.TEACHER, GraduateType.ORGANIZER):
+        await _finalize_free_registration(
+            message, state, app, user_id, username, full_name, graduate_type,
+            graduation_year, event_id_for_db, city_prep, date_display, guests,
+        )
+    else:
+        await _finalize_paid_registration(
+            message, state, app, user_id, username, full_name, graduate_type,
+            graduation_year, selected_event, event_id_for_db, city_prep, date_display, guests,
+        )
+
+
 async def register_user(
     message: Message,
     state: FSMContext,
@@ -1121,55 +1194,11 @@ async def register_user(
         message, state, app, selected_event, graduation_year, graduate_type, user_id, username
     )
 
-    log_msg = await app.log_registration_step(
-        user_id,
-        username,
-        "Регистрация завершена",
-        f"Город: {reg_city_name}, ФИО: {full_name}, Выпуск: {graduation_year} {class_letter}, Гости: {len(guests)}",
+    await _save_and_log_registration(
+        app, message, state, user_id, username,
+        full_name, graduation_year, class_letter, graduate_type,
+        selected_event, location, reg_city_name, target_city_value, guests,
     )
-    await _append_log(user_id, log_msg)
-
-    await app.log_registration_completed(
-        user_id,
-        username or "",
-        full_name,
-        graduation_year,
-        class_letter,
-        reg_city_name,
-        graduate_type.value,
-        guests=guests,
-    )
-
-    await delete_log_messages(user_id)
-
-    event_id_for_db = str(selected_event["_id"]) if selected_event else ""
-    if guests:
-        await app.save_registration_guests(user_id, event_id_for_db, guests)
-
-    city_prep = ""
-    if selected_event:
-        city_prep = selected_event.get("city_prepositional", reg_city_name)
-    elif location:
-        from src.app import CITY_PREPOSITIONAL_MAP
-
-        city_prep = CITY_PREPOSITIONAL_MAP.get(location, location)
-
-    date_display = get_event_date_display(selected_event) if selected_event else ""
-
-    event_is_free = (
-        is_event_free(selected_event, graduate_type.value) if selected_event else False
-    )
-
-    if event_is_free or graduate_type in (GraduateType.TEACHER, GraduateType.ORGANIZER):
-        await _finalize_free_registration(
-            message, state, app, user_id, username, full_name, graduate_type,
-            graduation_year, event_id_for_db, city_prep, date_display, guests
-        )
-    else:
-        await _finalize_paid_registration(
-            message, state, app, user_id, username, full_name, graduate_type,
-            graduation_year, selected_event, event_id_for_db, city_prep, date_display, guests
-        )
 
 
 # Add this function to delete log messages
