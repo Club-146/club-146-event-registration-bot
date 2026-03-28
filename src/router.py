@@ -5,6 +5,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
     Message,
 )
+from datetime import datetime
 from dotenv import load_dotenv
 from loguru import logger
 from textwrap import dedent
@@ -29,9 +30,12 @@ log_messages: Dict[int, List[Message]] = {}
 
 
 def get_event_date_display(event: Optional[Dict]) -> str:
-    """Get display date from an event dict."""
+    """Get display date from an event dict. Auto-appends year for non-current-year events."""
     if event:
-        return event.get("date_display", "дата неизвестна")
+        display = event.get("date_display", "дата неизвестна")
+        if event.get("date") and event["date"].year != datetime.now().year:
+            display += f" {event['date'].year}"
+        return display
     return "дата неизвестна"
 
 
@@ -157,6 +161,20 @@ async def _format_single_reg_info(reg: Dict, app: App) -> str:
     return info_text, event_is_free
 
 
+async def _show_past_registrations(message: Message, past_regs: List[Dict], app: App):
+    """Show read-only history of past registrations."""
+    info_text = "📅 Ваши прошлые регистрации:\n\n"
+    for reg in past_regs:
+        event = await app.get_event_for_registration(reg)
+        city = reg["target_city"]
+        date_str = get_event_date_display(event)
+        payment_status = reg.get("payment_status", "")
+        status_emoji = _payment_status_emoji(payment_status) if payment_status else ""
+        info_text += f"• {city} ({date_str}) {status_emoji}\n"
+    info_text += "\nСледите за новостями — будем рады видеть вас на следующих встречах!"
+    await send_safe(message.chat.id, info_text, reply_markup=ReplyKeyboardRemove())
+
+
 async def handle_registered_user(
     message: Message, state: FSMContext, registration, app: App
 ):
@@ -176,13 +194,28 @@ async def handle_registered_user(
         )
         return
 
-    if len(registrations) > 1:
+    # Split into future and past
+    future_regs = []
+    past_regs = []
+    for reg in registrations:
+        event = await app.get_event_for_registration(reg)
+        if event and app.is_event_passed(event):
+            past_regs.append(reg)
+        else:
+            future_regs.append(reg)
+
+    if not future_regs:
+        # Only past registrations — show history
+        await _show_past_registrations(message, past_regs, app)
+        return
+
+    if len(future_regs) > 1:
         await _handle_multi_registrations(
-            message, state, registrations, registration, app
+            message, state, future_regs, registration, app
         )
     else:
         await _handle_single_registration(
-            message, state, registrations[0], registration, app
+            message, state, future_regs[0], registration, app
         )
 
 
@@ -1054,7 +1087,7 @@ async def _finalize_free_registration(
         )
         await send_safe(
             message.chat.id,
-            confirmation_msg + "\nСейчас пришлем информацию об оплате за гостей...",
+            confirmation_msg + "\nСейчас пришлем информацию об оплате за гостей...\n\nЕсли передумаете — используйте /cancel_registration для отмены.",
         )
         from src.routers.payment import process_payment
 
@@ -1075,6 +1108,7 @@ async def _finalize_free_registration(
             admin_comment=comment,
             payment_amount=0,
         )
+        confirmation_msg += "\n\nЕсли передумаете — используйте /cancel_registration для отмены."
         await send_safe(
             message.chat.id, confirmation_msg, reply_markup=ReplyKeyboardRemove()
         )
@@ -1137,7 +1171,7 @@ async def _finalize_paid_registration(
     )
     if guests:
         confirmation_msg += f"\nС вами {len(guests)} гост{'ь' if len(guests) == 1 else 'ей' if len(guests) >= 5 else 'я'}. "
-    confirmation_msg += "Сейчас пришлем информацию об оплате..."
+    confirmation_msg += "Сейчас пришлем информацию об оплате...\n\nЕсли передумаете — используйте /cancel_registration для отмены."
     await send_safe(message.chat.id, confirmation_msg)
 
     from src.routers.payment import process_payment
@@ -1787,12 +1821,17 @@ async def start_handler(message: Message, state: FSMContext, app: App):
     upcoming_events = [e for e in enabled_events if not app.is_event_passed(e)]
 
     if not upcoming_events:
-        await send_safe(
-            message.chat.id,
-            "Все встречи выпускников уже прошли. Спасибо, что были с нами! 🎓\n\n"
-            "Следите за новостями в группе школы, чтобы не пропустить следующие встречи.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        # Show past registrations if user has any
+        user_regs = await app.get_user_registrations(message.from_user.id)
+        if user_regs:
+            await _show_past_registrations(message, user_regs, app)
+        else:
+            await send_safe(
+                message.chat.id,
+                "Все встречи выпускников уже прошли. Спасибо, что были с нами! 🎓\n\n"
+                "Следите за новостями в группе школы, чтобы не пропустить следующие встречи.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
         return
 
     active_registrations = await app.get_user_active_registrations(message.from_user.id)
@@ -1809,3 +1848,129 @@ async def start_handler(message: Message, state: FSMContext, app: App):
             await _show_multi_event_welcome(
                 message, state, app, upcoming_events, existing_registration
             )
+
+
+async def _handle_admin_forwarded_payment(message: Message, state: FSMContext, app: App):
+    """Admin forwarded a photo/PDF from a user — process as their payment proof."""
+    from aiogram.types import MessageOriginUser
+    from src.routers.payment import process_payment
+
+    origin = message.forward_origin
+
+    if isinstance(origin, MessageOriginUser):
+        sender_id = origin.sender_user.id
+        sender_username = origin.sender_user.username or ""
+    else:
+        # Hidden user — can't identify
+        sender_name = getattr(origin, "sender_user_name", "неизвестно")
+        await send_safe(
+            message.chat.id,
+            f"Не удалось определить отправителя (скрытый профиль: {sender_name}).\n"
+            "Используйте /start → «Отметить оплату» для ручного подтверждения.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    # Find unpaid registration for this user
+    registrations = await app.get_user_active_registrations(sender_id)
+    payment_regs = []
+    for reg in registrations:
+        event = await app.get_event_for_registration(reg)
+        graduate_type_val = reg.get("graduate_type", GraduateType.GRADUATE.value)
+        if not is_event_free(event, graduate_type_val) and reg.get("payment_status") != "confirmed":
+            payment_regs.append(reg)
+
+    if not payment_regs:
+        await send_safe(
+            message.chat.id,
+            f"У пользователя @{sender_username or sender_id} нет неоплаченных регистраций.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    selected_reg = payment_regs[0]
+    await state.update_data(
+        original_user_id=sender_id, original_username=sender_username
+    )
+
+    await send_safe(
+        message.chat.id,
+        f"Обрабатываю платёж от @{sender_username or sender_id} ({selected_reg.get('full_name', '?')})...",
+    )
+
+    await process_payment(
+        message,
+        state,
+        selected_reg["event_id"],
+        selected_reg["graduation_year"],
+        skip_instructions=True,
+        graduate_type=selected_reg.get("graduate_type", GraduateType.GRADUATE.value),
+        pre_uploaded_response=message,
+    )
+
+
+@router.message(F.photo, F.chat.type == "private")
+@router.message(
+    F.document, F.chat.type == "private"
+)
+async def photo_document_handler(message: Message, state: FSMContext, app: App):
+    """Auto-treat photos and PDFs as payment proof without requiring /pay first."""
+    if message.from_user is None:
+        return
+
+    # Only handle PDFs for documents, ignore other file types
+    if message.document and (
+        not message.document.mime_type
+        or message.document.mime_type != "application/pdf"
+    ):
+        return
+
+    # Admin forwarded a message from a user — treat as their payment proof
+    if is_admin(message.from_user) and message.forward_origin:
+        await _handle_admin_forwarded_payment(message, state, app)
+        return
+
+    user_id = message.from_user.id
+
+    registrations = await app.get_user_active_registrations(user_id)
+    if not registrations:
+        await send_safe(
+            message.chat.id,
+            "Вы еще не зарегистрированы на встречу. Используйте /start для регистрации.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    from src.routers.payment import process_payment
+
+    # Find registrations that need payment
+    payment_registrations = []
+    for reg in registrations:
+        event = await app.get_event_for_registration(reg)
+        graduate_type_val = reg.get("graduate_type", GraduateType.GRADUATE.value)
+        if not is_event_free(event, graduate_type_val) and reg.get("payment_status") != "confirmed":
+            payment_registrations.append(reg)
+
+    if not payment_registrations:
+        await send_safe(
+            message.chat.id,
+            "У вас нет регистраций, требующих оплаты. Если хотите что-то другое — используйте /start.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    # Use the first unpaid registration
+    selected_reg = payment_registrations[0]
+    await state.update_data(
+        original_user_id=user_id, original_username=message.from_user.username
+    )
+
+    await process_payment(
+        message,
+        state,
+        selected_reg["event_id"],
+        selected_reg["graduation_year"],
+        skip_instructions=True,
+        graduate_type=selected_reg.get("graduate_type", GraduateType.GRADUATE.value),
+        pre_uploaded_response=message,
+    )

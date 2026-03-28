@@ -239,7 +239,9 @@ async def _ask_attended_city(message, state, app: App, feedback_data: dict) -> t
         status = ev.get("status", "")
         if status in ("archived", "passed"):
             ev_id = str(ev["_id"])
-            label = f"{ev.get('city', 'Unknown')}, {ev.get('date_display', '')}"
+            from src.router import get_event_date_display
+
+            label = f"{ev.get('city', 'Unknown')}, {get_event_date_display(ev)}"
             city_choices[ev_id] = label
     city_choices["skip"] = "Пропустить вопрос"
     city_choices["cancel"] = "Отмена"

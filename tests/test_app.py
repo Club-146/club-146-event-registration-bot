@@ -330,14 +330,32 @@ class TestExportPassThrough:
     def teardown_method(self):
         self.db_patcher.stop()
 
-    def test_export_registered_users_to_google_sheets(self):
+    @pytest.mark.asyncio
+    async def test_export_registered_users_to_google_sheets_force(self):
         self.app.sheet_exporter = MagicMock()
-        self.app.sheet_exporter.export_registered_users.return_value = "ok"
-        result = self.app.export_registered_users_to_google_sheets(event_id="abc")
+        self.app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        result = await self.app.export_registered_users_to_google_sheets(
+            event_id="abc", force=True
+        )
         self.app.sheet_exporter.export_registered_users.assert_called_once_with(
             event_id="abc"
         )
         assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_export_registered_users_to_google_sheets_debounced(self):
+        self.app.sheet_exporter = MagicMock()
+        self.app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        self.app._export_debounce_seconds = 0.1
+        await self.app.export_registered_users_to_google_sheets(event_id="abc")
+        # Should not have been called yet (debounce pending)
+        self.app.sheet_exporter.export_registered_users.assert_not_called()
+        # Wait for debounce to fire
+        import asyncio
+        await asyncio.sleep(0.2)
+        self.app.sheet_exporter.export_registered_users.assert_called_once_with(
+            event_id="abc"
+        )
 
     @pytest.mark.asyncio
     async def test_export_to_csv(self):

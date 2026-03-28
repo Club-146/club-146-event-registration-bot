@@ -1,3 +1,4 @@
+import asyncio
 import re
 from aiogram.types import Message
 from datetime import datetime
@@ -142,6 +143,8 @@ class App:
         self._event_logs = None
         self._deleted_users = None
         self._events_col = None
+        self._export_debounce_task: asyncio.Task | None = None
+        self._export_debounce_seconds = 30
 
     async def startup(self):
         """Run startup tasks like fixing the database and initializing collections."""
@@ -649,8 +652,29 @@ class App:
                 "Неверный формат. Пожалуйста, введите год выпуска и букву класса (например, '2003 Б').",
             )
 
-    def export_registered_users_to_google_sheets(self, event_id: Optional[str] = None):
-        return self.sheet_exporter.export_registered_users(event_id=event_id)
+    async def export_registered_users_to_google_sheets(
+        self, event_id: Optional[str] = None, force: bool = False
+    ):
+        """Export to Google Sheets. Debounced by default (30s) to avoid rate limits.
+
+        Use force=True for explicit admin exports that need immediate results.
+        """
+        if force:
+            return await self.sheet_exporter.export_registered_users(event_id=event_id)
+
+        if self._export_debounce_task and not self._export_debounce_task.done():
+            self._export_debounce_task.cancel()
+            logger.debug("Export debounce reset — new edit arrived")
+
+        async def _delayed_export():
+            await asyncio.sleep(self._export_debounce_seconds)
+            logger.info("Debounce timer elapsed, exporting to Google Sheets")
+            try:
+                await self.sheet_exporter.export_registered_users(event_id=event_id)
+            except Exception as e:
+                logger.error(f"Google Sheets export failed: {e}")
+
+        self._export_debounce_task = asyncio.create_task(_delayed_export())
 
     async def export_to_csv(self, event_id: Optional[str] = None):
         """Export registered users to CSV"""

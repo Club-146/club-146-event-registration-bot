@@ -334,8 +334,10 @@ def _build_default_announcement(enabled_events: list, post_link: str) -> str:
         venue = ev.get("venue") or "Уточняется"
         address = ev.get("address") or ""
         venue_line = venue + (f", {address}" if address else "")
+        from src.router import get_event_date_display
+
         events_list += (
-            f"🏙️ {ev.get('city', '?')} ({ev.get('date_display', '?')})\n"
+            f"🏙️ {ev.get('city', '?')} ({get_event_date_display(ev)})\n"
             f"   📍 {venue_line}\n"
         )
     msg = f"Встречи 146 — {cities_str} — приходи!\n\n{events_list}\n"
@@ -404,7 +406,9 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
 
     events_preview = "📅 Текущие активные встречи:\n"
     for ev in enabled_events:
-        events_preview += f"  • {ev.get('city', '?')} ({ev.get('date_display', '?')})\n"
+        from src.router import get_event_date_display
+
+        events_preview += f"  • {ev.get('city', '?')} ({get_event_date_display(ev)})\n"
     await send_safe(message.chat.id, events_preview)
 
     # Step 1: audience scope

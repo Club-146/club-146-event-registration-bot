@@ -51,6 +51,7 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
             "view_stats": "Посмотреть статистику (подробно)",
             "view_simple_stats": "Посмотреть статистику (кратко)",
             "other": "Другие действия",
+            "register_payment": "Отметить оплату",
             "notify_users": "Рассылка пользователям",
             "announce_season": "Анонс нового сезона встреч",
         },
@@ -100,8 +101,8 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
     #     from src.routers.crm import send_feedback_request_handler
 
     #     await send_feedback_request_handler(message, state)
-    # elif response == "mark_payment":
-    # await mark_payment_handler(message, state)
+    elif response == "register_payment":
+        await admin_register_payment(message, state, app)
     elif response == "notify_users":
         from src.routers.crm import notify_users_handler
 
@@ -112,6 +113,147 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
         await announce_new_season_handler(message, state, app=app)
     # For "register", continue with normal flow
     return response
+
+
+async def admin_register_payment(message: Message, state: FSMContext, app: App):
+    """Admin flow: select event → pick unpaid user → confirm payment."""
+    from src.router import get_event_date_display, is_event_free
+
+    all_events = await app.get_all_events()
+    non_archived = [e for e in all_events if e.get("status") != "archived"]
+
+    if not non_archived:
+        await send_safe(message.chat.id, "Нет доступных встреч.")
+        return
+
+    event_choices = {}
+    for ev in non_archived:
+        eid = str(ev["_id"])
+        event_choices[eid] = f"{ev.get('city', '?')} ({get_event_date_display(ev)})"
+    event_choices["cancel"] = "Отмена"
+
+    selected = await ask_user_choice(
+        message.chat.id,
+        "Выберите встречу:",
+        choices=event_choices,
+        state=state,
+        timeout=None,
+    )
+    if selected == "cancel":
+        await send_safe(message.chat.id, "Отменено.")
+        return
+
+    # Get unpaid users for this event
+    unpaid_users = await app.get_unpaid_users(event_id=selected)
+
+    if not unpaid_users:
+        await send_safe(message.chat.id, "Все участники этой встречи уже оплатили!")
+        return
+
+    user_choices = {}
+    for u in unpaid_users:
+        uid = str(u["user_id"]) if u.get("user_id") else f"reg_{u['_id']}"
+        uname = f"@{u['username']}" if u.get("username") else "без username"
+        status = u.get("payment_status", "не оплачено")
+        user_choices[uid] = f"{uname} — {u.get('full_name', '?')} ({status})"
+    user_choices["manual"] = "Ввести username вручную"
+    user_choices["cancel"] = "Отмена"
+
+    chosen_user = await ask_user_choice(
+        message.chat.id,
+        f"Неоплаченные участники ({len(unpaid_users)}):",
+        choices=user_choices,
+        state=state,
+        timeout=None,
+    )
+    if chosen_user == "cancel":
+        await send_safe(message.chat.id, "Отменено.")
+        return
+
+    if chosen_user == "manual":
+        username_input = await ask_user_raw(
+            message.chat.id,
+            "Введите Telegram username (с @ или без):",
+            state=state,
+            timeout=300,
+        )
+        if not username_input:
+            await send_safe(message.chat.id, "Время ожидания истекло.")
+            return
+        username_clean = username_input.lstrip("@").strip()
+        reg = await app.collection.find_one(
+            {"username": username_clean, "event_id": selected}
+        )
+        if not reg:
+            await send_safe(
+                message.chat.id,
+                f"Пользователь @{username_clean} не найден среди зарегистрированных на эту встречу.",
+            )
+            return
+        target_user_id = reg.get("user_id")
+        target_name = reg.get("full_name", "?")
+    else:
+        # Find the registration
+        reg = next(
+            (u for u in unpaid_users if str(u.get("user_id")) == chosen_user),
+            None,
+        )
+        if not reg:
+            await send_safe(message.chat.id, "Ошибка: пользователь не найден.")
+            return
+        target_user_id = reg.get("user_id")
+        target_name = reg.get("full_name", "?")
+
+    # Ask for amount
+    amount_input = await ask_user_raw(
+        message.chat.id,
+        f"Подтверждаем оплату для {target_name}.\nВведите сумму в рублях:",
+        state=state,
+        timeout=300,
+    )
+    if not amount_input:
+        await send_safe(message.chat.id, "Время ожидания истекло.")
+        return
+
+    try:
+        amount = int(amount_input.strip())
+    except ValueError:
+        await send_safe(message.chat.id, "Неверный формат суммы.")
+        return
+
+    if target_user_id:
+        await app.update_payment_status(
+            user_id=int(target_user_id),
+            event_id=selected,
+            status="confirmed",
+            payment_amount=amount,
+            admin_id=message.from_user.id if message.from_user else None,
+            admin_username=message.from_user.username if message.from_user else None,
+        )
+
+        # Notify the user
+        try:
+            from botspot.core.dependency_manager import get_dependency_manager
+
+            bot = get_dependency_manager().bot
+            await bot.send_message(
+                int(target_user_id),
+                f"Ваша оплата {amount}₽ подтверждена администратором. Спасибо!",
+            )
+        except Exception as e:
+            logger.warning(f"Could not notify user {target_user_id}: {e}")
+    else:
+        # No user_id — update by registration _id
+        await app.collection.update_one(
+            {"_id": reg["_id"]},
+            {"$set": {"payment_status": "confirmed", "payment_amount": amount}},
+        )
+
+    await send_safe(
+        message.chat.id,
+        f"Оплата {amount}₽ подтверждена для {target_name}.",
+    )
+    await app.export_registered_users_to_google_sheets()
 
 
 @commands_menu.add_command(
@@ -166,7 +308,7 @@ async def export_handler(message: Message, state: FSMContext, app: App):
         if export_format_response == "sheets":
             await notif.edit_text("Экспорт данных в Google Таблицы...")
             result = await app.export_registered_users_to_google_sheets(
-                event_id=selected_event_id
+                event_id=selected_event_id, force=True
             )
             await send_safe(message.chat.id, result or "")
         else:

@@ -685,8 +685,13 @@ async def process_payment(
     skip_instructions=False,
     graduate_type: str = GraduateType.GRADUATE.value,
     guests: list | None = None,
+    pre_uploaded_response: Message | None = None,
 ):
-    """Process payment for an event registration"""
+    """Process payment for an event registration.
+
+    If pre_uploaded_response is provided (photo/PDF already sent by user),
+    skip the prompt and process it directly as payment proof.
+    """
     user_id, username = await _resolve_user_identity(message, state)
 
     registration_data, event = await _load_registration_and_event(user_id, event_id)
@@ -701,6 +706,35 @@ async def process_payment(
     total_regular_with_guests, total_discounted_with_guests = _calc_guest_totals(
         guests, regular_amount, discounted_amount
     )
+
+    # If user already sent a photo/PDF, skip prompts and process directly
+    if pre_uploaded_response is not None:
+        await app.save_event_log(
+            "payment_action",
+            {
+                "action": "auto_payment_proof",
+                "city": city,
+                "amount": discounted_amount,
+                "regular_amount": regular_amount,
+                "graduate_type": graduate_type,
+            },
+            user_id,
+            username,
+        )
+        return await _handle_screenshot_upload(
+            message,
+            pre_uploaded_response,
+            user_id,
+            username,
+            city,
+            event_id,
+            guests,
+            discount,
+            discounted_amount,
+            regular_amount,
+            formula_amount,
+            graduate_type,
+        )
 
     if not skip_instructions:
         await _send_payment_info_messages(
