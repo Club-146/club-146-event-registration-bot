@@ -89,7 +89,9 @@ def parse_payment_callback_data(callback_data: str) -> tuple[int, str, str | Non
     return user_id, city_code, amount_str
 
 
-async def _resolve_user_identity(message: Message, state: FSMContext) -> tuple[int, str]:
+async def _resolve_user_identity(
+    message: Message, state: FSMContext
+) -> tuple[int, str]:
     state_data = await state.get_data()
     user_id = state_data.get("original_user_id")
     username = state_data.get("original_username", "")
@@ -942,9 +944,7 @@ class PaymentStates(StatesGroup):
     waiting_for_decline_reason = State()
 
 
-async def _resolve_registration_from_callback(
-    user_id: int, event_id: str
-):
+async def _resolve_registration_from_callback(user_id: int, event_id: str):
     if event_id in _LEGACY_CITY_CODES_REVERSE:
         city = _LEGACY_CITY_CODES_REVERSE[event_id]
         logger.warning(f"Legacy callback format, resolved city: {city}")
@@ -1000,9 +1000,7 @@ async def _resolve_payment_amount(
         )
         if amount_response is None or amount_response.text is None:
             await send_safe(chat_id, "Время ожидания истекло. Операция отменена.")
-            logger.warning(
-                f"Payment amount input timeout for user in city {city}"
-            )
+            logger.warning(f"Payment amount input timeout for user in city {city}")
             return None
         try:
             return int(amount_response.text)
@@ -1168,7 +1166,9 @@ async def confirm_payment_callback(callback_query: CallbackQuery, state: FSMCont
             recommended_amount,
             payment_history,
         )
-        await _update_callback_message_confirmed(callback_query, payment_status, user_info)
+        await _update_callback_message_confirmed(
+            callback_query, payment_status, user_info
+        )
 
     await callback_query.answer("Платеж подтвержден")
     await app.export_registered_users_to_google_sheets()

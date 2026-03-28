@@ -526,17 +526,13 @@ class TestStartup:
     async def test_startup_no_fixes(self, app):
         """Test startup when _fix_database returns total_fixed == 0."""
         # _update_event_statuses
-        app.events_col.update_many = AsyncMock(
-            return_value=MagicMock(modified_count=0)
-        )
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
         # _fix_database internals
         mock_events_cursor = MagicMock()
         mock_events_cursor.sort = MagicMock(return_value=mock_events_cursor)
         mock_events_cursor.to_list = AsyncMock(return_value=[])
         app.events_col.find = MagicMock(return_value=mock_events_cursor)
-        app.collection.update_many = AsyncMock(
-            return_value=MagicMock(modified_count=0)
-        )
+        app.collection.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
 
         with patch("src.migrations.run_migrations", AsyncMock(return_value=None)):
             await app.startup()
@@ -553,12 +549,8 @@ class TestStartup:
         mock_events_cursor.sort = MagicMock(return_value=mock_events_cursor)
         mock_events_cursor.to_list = AsyncMock(return_value=mock_events)
         app.events_col.find = MagicMock(return_value=mock_events_cursor)
-        app.events_col.update_many = AsyncMock(
-            return_value=MagicMock(modified_count=0)
-        )
-        app.collection.update_many = AsyncMock(
-            return_value=MagicMock(modified_count=1)
-        )
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+        app.collection.update_many = AsyncMock(return_value=MagicMock(modified_count=1))
         app.event_logs.insert_one = AsyncMock()
 
         with patch("src.migrations.run_migrations", AsyncMock(return_value=None)):
@@ -568,18 +560,14 @@ class TestStartup:
 class TestUpdateEventStatuses:
     @pytest.mark.asyncio
     async def test_no_modified(self, app):
-        app.events_col.update_many = AsyncMock(
-            return_value=MagicMock(modified_count=0)
-        )
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
         await app._update_event_statuses()
         app.events_col.update_many.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_some_modified(self, app):
         """Exercises lines 389-390: modified_count > 0 -> logger.info."""
-        app.events_col.update_many = AsyncMock(
-            return_value=MagicMock(modified_count=3)
-        )
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=3))
         await app._update_event_statuses()
         app.events_col.update_many.assert_called_once()
 
@@ -833,9 +821,7 @@ class TestHasProvidedFeedbackWithEventId:
 
         result = await app.has_provided_feedback(1, event_id="e1")
         assert result is True
-        mock_fb_col.find_one.assert_called_once_with(
-            {"user_id": 1, "event_id": "e1"}
-        )
+        mock_fb_col.find_one.assert_called_once_with({"user_id": 1, "event_id": "e1"})
 
     @pytest.mark.asyncio
     async def test_with_event_id_not_found(self, app):

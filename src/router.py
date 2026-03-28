@@ -102,7 +102,9 @@ async def _format_multi_reg_info(registrations: List[Dict], app: App) -> str:
             payment_status = f" - {_payment_status_emoji(status)} {status}"
         info_text += f"• {city} ({get_event_date_display(event)}){payment_status}\n"
         info_text += f"  ФИО: {reg['full_name']}\n"
-        info_text += f"  Год выпуска: {reg['graduation_year']}, Класс: {reg['class_letter']}\n"
+        info_text += (
+            f"  Год выпуска: {reg['graduation_year']}, Класс: {reg['class_letter']}\n"
+        )
         reg_guests = reg.get("guests", [])
         if reg_guests:
             guest_names = ", ".join(g["name"] for g in reg_guests)
@@ -121,7 +123,9 @@ async def _format_single_reg_info(reg: Dict, app: App) -> str:
     payment_status_line = ""
     if not event_is_free:
         status = reg.get("payment_status", "не оплачено")
-        payment_status_line = f"Статус оплаты: {_payment_status_emoji(status)} {status}\n"
+        payment_status_line = (
+            f"Статус оплаты: {_payment_status_emoji(status)} {status}\n"
+        )
 
     info_text = dedent(
         f"""
@@ -173,9 +177,13 @@ async def handle_registered_user(
         return
 
     if len(registrations) > 1:
-        await _handle_multi_registrations(message, state, registrations, registration, app)
+        await _handle_multi_registrations(
+            message, state, registrations, registration, app
+        )
     else:
-        await _handle_single_registration(message, state, registrations[0], registration, app)
+        await _handle_single_registration(
+            message, state, registrations[0], registration, app
+        )
 
 
 async def _handle_multi_registrations(
@@ -211,7 +219,6 @@ async def _handle_single_registration(
 ):
     info_text, event_is_free = await _format_single_reg_info(reg, app)
     city = reg["target_city"]
-    graduate_type = reg.get("graduate_type", GraduateType.GRADUATE.value)
     needs_payment = not event_is_free and reg.get("payment_status") != "confirmed"
 
     choices = {"nothing": "Ничего, всё в порядке"}
@@ -261,7 +268,9 @@ async def _handle_single_registration(
         )
 
 
-async def _pay_existing_registration(message: Message, state: FSMContext, reg, app: App):
+async def _pay_existing_registration(
+    message: Message, state: FSMContext, reg, app: App
+):
     from src.routers.payment import process_payment
 
     assert message.from_user is not None
@@ -286,7 +295,6 @@ async def _edit_guests(
     message: Message, state: FSMContext, reg: Dict, event: Dict, app: App
 ):
     """Allow user to add/change/remove guests on an existing registration."""
-    from src.user_interactions import ask_user_raw
 
     assert message.from_user is not None
     user_id = message.from_user.id
@@ -329,11 +337,20 @@ async def _edit_guests(
 
     graduation_year = reg.get("graduation_year", 2000)
     graduate_type = reg.get("graduate_type", GraduateType.GRADUATE.value)
-    reg_amount, _, _, _ = app.calculate_event_payment(event, graduation_year, graduate_type)
-    guest_price_regular, guest_price_discounted = app.calculate_guest_price(event, reg_amount)
+    reg_amount, _, _, _ = app.calculate_event_payment(
+        event, graduation_year, graduate_type
+    )
+    guest_price_regular, guest_price_discounted = app.calculate_guest_price(
+        event, reg_amount
+    )
 
     guests = await _collect_guest_names(
-        message, state, guest_count, existing_guests, guest_price_regular, guest_price_discounted
+        message,
+        state,
+        guest_count,
+        existing_guests,
+        guest_price_regular,
+        guest_price_discounted,
     )
 
     await app.save_registration_guests(user_id, reg_event_id, guests)
@@ -438,7 +455,9 @@ async def manage_registrations(
     elif response == "back":
         await handle_registered_user(message, state, registrations[0], app)
     else:
-        await _handle_single_reg_management(message, state, registrations, response, app)
+        await _handle_single_reg_management(
+            message, state, registrations, response, app
+        )
 
 
 async def _handle_cancel_all_registrations(
@@ -506,7 +525,9 @@ async def _handle_single_reg_management(
 
     choices = {}
     if event and event.get("guests_enabled"):
-        choices["guests"] = "👥 Изменить гостей" if existing_guests else "👥 Добавить гостей"
+        choices["guests"] = (
+            "👥 Изменить гостей" if existing_guests else "👥 Добавить гостей"
+        )
     choices["cancel"] = "Отменить регистрацию"
     choices["back"] = "Вернуться назад"
 
@@ -528,7 +549,9 @@ async def _handle_single_reg_management(
 
     if action == "guests":
         if event is None:
-            await send_safe(message.chat.id, "Произошла ошибка: не удалось найти мероприятие.")
+            await send_safe(
+                message.chat.id, "Произошла ошибка: не удалось найти мероприятие."
+            )
             return
         await _edit_guests(message, state, reg, event, app)
         remaining = await app.get_user_active_registrations(message.from_user.id)
@@ -577,12 +600,20 @@ async def handle_cancel_option(response, message: Message, state: FSMContext) ->
 
 
 async def _select_preselected_city(
-    message: Message, app: App, enabled_events: list,
-    preselected_city: str, user_id: int, username,
+    message: Message,
+    app: App,
+    enabled_events: list,
+    preselected_city: str,
+    user_id: int,
+    username,
 ):
     """Handle the preselected-city branch. Returns (event, city) or (None, None)."""
     selected_event = next(
-        (e for e in enabled_events if e["city"] == preselected_city or e["name"] == preselected_city),
+        (
+            e
+            for e in enabled_events
+            if e["city"] == preselected_city or e["name"] == preselected_city
+        ),
         None,
     )
     if selected_event and app.is_event_passed(selected_event):
@@ -603,13 +634,19 @@ async def _select_preselected_city(
 
 
 async def _ask_city_choice(
-    message: Message, state: FSMContext, app: App,
-    enabled_events: list, existing_event_ids: List[str],
-    event_map: dict, user_id: int, username,
+    message: Message,
+    state: FSMContext,
+    app: App,
+    enabled_events: list,
+    existing_event_ids: List[str],
+    event_map: dict,
+    user_id: int,
+    username,
 ):
     """Ask the user to choose a city. Returns (event, location) or (None, None)."""
     available_events = [
-        e for e in enabled_events
+        e
+        for e in enabled_events
         if not app.is_event_passed(e) and str(e["_id"]) not in existing_event_ids
     ]
 
@@ -621,14 +658,18 @@ async def _ask_city_choice(
             reply_markup=ReplyKeyboardRemove(),
         )
         log_msg = await app.log_registration_step(
-            user_id, username,
+            user_id,
+            username,
             "Нет доступных городов",
             "Пользователь уже зарегистрирован во всех городах или все встречи прошли",
         )
         await _append_log(user_id, log_msg)
         return None, None
 
-    available_cities = {str(e["_id"]): f"{e['city']} ({e.get('date_display', '')})" for e in available_events}
+    available_cities = {
+        str(e["_id"]): f"{e['city']} ({e.get('date_display', '')})"
+        for e in available_events
+    }
     available_cities["cancel"] = "Отменить регистрацию"
 
     response = await ask_user_choice(
@@ -693,7 +734,14 @@ async def _select_event_for_registration(
         )
 
     return await _ask_city_choice(
-        message, state, app, enabled_events, existing_event_ids, event_map, user_id, username
+        message,
+        state,
+        app,
+        enabled_events,
+        existing_event_ids,
+        event_map,
+        user_id,
+        username,
     )
 
 
@@ -718,8 +766,12 @@ async def _collect_full_name(
         if valid:
             full_name = response
         else:
-            await send_safe(message.chat.id, f"❌ {error} Пожалуйста, попробуйте еще раз.")
-    log_msg = await app.log_registration_step(user_id, username, "Ввод ФИО", f"ФИО: {full_name}")
+            await send_safe(
+                message.chat.id, f"❌ {error} Пожалуйста, попробуйте еще раз."
+            )
+    log_msg = await app.log_registration_step(
+        user_id, username, "Ввод ФИО", f"ФИО: {full_name}"
+    )
     await _append_log(user_id, log_msg)
     return full_name
 
@@ -766,7 +818,10 @@ async def _collect_graduation_info(
             break
 
     log_msg = await app.log_registration_step(
-        user_id, username, "Ввод года выпуска и класса", f"Год: {graduation_year}, Класс: {class_letter}"
+        user_id,
+        username,
+        "Ввод года выпуска и класса",
+        f"Год: {graduation_year}, Класс: {class_letter}",
     )
     await _append_log(user_id, log_msg)
     return graduation_year, class_letter, graduate_type
@@ -780,30 +835,37 @@ async def _handle_graduation_response(
     done=True means break out of the while loop.
     """
     if response == "/i_am_a_teacher":
-        log_msg = await app.log_registration_step(user_id, username, "Статус участника", "Учитель")
+        log_msg = await app.log_registration_step(
+            user_id, username, "Статус участника", "Учитель"
+        )
         await _append_log(user_id, log_msg)
         return 0, "Т", GraduateType.TEACHER, True
 
     if response == "/i_am_a_friend":
-        log_msg = await app.log_registration_step(user_id, username, "Статус участника", "Не выпускник")
+        log_msg = await app.log_registration_step(
+            user_id, username, "Статус участника", "Не выпускник"
+        )
         await _append_log(user_id, log_msg)
         await send_safe(message.chat.id, "Вы зарегистрированы как друг школы 146!")
         return 2000, "Н", GraduateType.NON_GRADUATE, True
 
     if response == "/i_am_an_organizer":
-        log_msg = await app.log_registration_step(user_id, username, "Статус участника", "Организатор")
+        log_msg = await app.log_registration_step(
+            user_id, username, "Статус участника", "Организатор"
+        )
         await _append_log(user_id, log_msg)
         await send_safe(message.chat.id, "Вы зарегистрированы как организатор встречи!")
         return 1000, "О", GraduateType.ORGANIZER, True
 
     if graduation_year is not None:
         # Only class letter needed
-        class_letter = response.strip().split()[-1]
         valid, error = app.validate_class_letter(response)
         if valid:
             return graduation_year, response.upper(), GraduateType.GRADUATE, False
         else:
-            await send_safe(message.chat.id, f"❌ {error} Пожалуйста, попробуйте еще раз.")
+            await send_safe(
+                message.chat.id, f"❌ {error} Пожалуйста, попробуйте еще раз."
+            )
             return graduation_year, None, GraduateType.GRADUATE, False
 
     # Parse both year and letter
@@ -834,7 +896,9 @@ async def _collect_user_info(
         full_name = reuse_info["full_name"]
         graduation_year = reuse_info["graduation_year"]
         class_letter = reuse_info["class_letter"]
-        graduate_type = GraduateType(reuse_info.get("graduate_type", GraduateType.GRADUATE.value))
+        graduate_type = GraduateType(
+            reuse_info.get("graduate_type", GraduateType.GRADUATE.value)
+        )
 
         confirm_text = dedent(
             f"""
@@ -910,7 +974,9 @@ async def _collect_guests_step(
         state=state,
         timeout=None,
     )
-    guest_count = int(guest_count_resp) if guest_count_resp and guest_count_resp.isdigit() else 0
+    guest_count = (
+        int(guest_count_resp) if guest_count_resp and guest_count_resp.isdigit() else 0
+    )
 
     if guest_count == 0:
         log_msg = await app.log_registration_step(
@@ -919,8 +985,12 @@ async def _collect_guests_step(
         await _append_log(user_id, log_msg)
         return []
 
-    reg_amount, _, _, _ = app.calculate_event_payment(selected_event, graduation_year, graduate_type.value)
-    guest_price_regular, guest_price_discounted = app.calculate_guest_price(selected_event, reg_amount)
+    reg_amount, _, _, _ = app.calculate_event_payment(
+        selected_event, graduation_year, graduate_type.value
+    )
+    guest_price_regular, guest_price_discounted = app.calculate_guest_price(
+        selected_event, reg_amount
+    )
 
     guests = await _collect_guest_names(
         message, state, guest_count, [], guest_price_regular, guest_price_discounted
@@ -965,7 +1035,9 @@ async def _finalize_free_registration(
         confirmation_msg += "\nДля учителей участие бесплатное. Спасибо за вашу работу!"
     elif graduate_type == GraduateType.ORGANIZER:
         comment = "Автоматически подтверждено (организатор)"
-        confirmation_msg += "\nДля организаторов участие бесплатное. Спасибо за вашу помощь!"
+        confirmation_msg += (
+            "\nДля организаторов участие бесплатное. Спасибо за вашу помощь!"
+        )
     else:
         comment = "Автоматически подтверждено (бесплатное мероприятие)"
         confirmation_msg += "\nДля этой встречи оплата не требуется. Все расходы участники несут самостоятельно."
@@ -975,7 +1047,10 @@ async def _finalize_free_registration(
         comment += f" (гости: {guest_total}₽)"
         confirmation_msg += f"\n\n💰 Оплата за гостей: {guest_total}₽"
         await app.update_payment_status(
-            user_id=user_id, event_id=event_id_for_db, status="not paid", payment_amount=0
+            user_id=user_id,
+            event_id=event_id_for_db,
+            status="not paid",
+            payment_amount=0,
         )
         await send_safe(
             message.chat.id,
@@ -985,15 +1060,24 @@ async def _finalize_free_registration(
 
         await state.update_data(original_user_id=user_id, original_username=username)
         await process_payment(
-            message, state, event_id_for_db, graduation_year,
-            graduate_type=graduate_type.value, guests=guests
+            message,
+            state,
+            event_id_for_db,
+            graduation_year,
+            graduate_type=graduate_type.value,
+            guests=guests,
         )
     else:
         await app.update_payment_status(
-            user_id=user_id, event_id=event_id_for_db, status="confirmed",
-            admin_comment=comment, payment_amount=0
+            user_id=user_id,
+            event_id=event_id_for_db,
+            status="confirmed",
+            admin_comment=comment,
+            payment_amount=0,
         )
-        await send_safe(message.chat.id, confirmation_msg, reply_markup=ReplyKeyboardRemove())
+        await send_safe(
+            message.chat.id, confirmation_msg, reply_markup=ReplyKeyboardRemove()
+        )
         await app.export_registered_users_to_google_sheets()
 
 
@@ -1021,13 +1105,17 @@ async def _finalize_paid_registration(
         )
         return
 
-    regular_amount, discount, discounted_amount, formula_amount = app.calculate_event_payment(
-        selected_event, graduation_year, graduate_type.value
+    regular_amount, discount, discounted_amount, formula_amount = (
+        app.calculate_event_payment(
+            selected_event, graduation_year, graduate_type.value
+        )
     )
 
     if guests:
         guest_total_regular = sum(g["price"] for g in guests)
-        guest_total_discounted = sum(g.get("price_discounted", g["price"]) for g in guests)
+        guest_total_discounted = sum(
+            g.get("price_discounted", g["price"]) for g in guests
+        )
         regular_amount += guest_total_regular
         discounted_amount += guest_total_discounted
         formula_amount += guest_total_regular
@@ -1056,8 +1144,12 @@ async def _finalize_paid_registration(
 
     await state.update_data(original_user_id=user_id, original_username=username)
     await process_payment(
-        message, state, event_id_for_db, graduation_year,
-        graduate_type=graduate_type.value, guests=guests
+        message,
+        state,
+        event_id_for_db,
+        graduation_year,
+        graduate_type=graduate_type.value,
+        guests=guests,
     )
 
 
@@ -1066,6 +1158,7 @@ def _get_city_prepositional(selected_event, location: str, reg_city_name: str) -
         return selected_event.get("city_prepositional", reg_city_name)
     if location:
         from src.app import CITY_PREPOSITIONAL_MAP
+
         return CITY_PREPOSITIONAL_MAP.get(location, location)
     return ""
 
@@ -1098,8 +1191,14 @@ async def _save_and_log_registration(
     await _append_log(user_id, log_msg)
 
     await app.log_registration_completed(
-        user_id, username or "", full_name, graduation_year,
-        class_letter, reg_city_name, graduate_type.value, guests=guests,
+        user_id,
+        username or "",
+        full_name,
+        graduation_year,
+        class_letter,
+        reg_city_name,
+        graduate_type.value,
+        guests=guests,
     )
 
     await delete_log_messages(user_id)
@@ -1109,17 +1208,40 @@ async def _save_and_log_registration(
 
     city_prep = _get_city_prepositional(selected_event, location, reg_city_name)
     date_display = get_event_date_display(selected_event) if selected_event else ""
-    event_is_free = is_event_free(selected_event, graduate_type.value) if selected_event else False
+    event_is_free = (
+        is_event_free(selected_event, graduate_type.value) if selected_event else False
+    )
 
     if event_is_free or graduate_type in (GraduateType.TEACHER, GraduateType.ORGANIZER):
         await _finalize_free_registration(
-            message, state, app, user_id, username, full_name, graduate_type,
-            graduation_year, event_id_for_db, city_prep, date_display, guests,
+            message,
+            state,
+            app,
+            user_id,
+            username,
+            full_name,
+            graduate_type,
+            graduation_year,
+            event_id_for_db,
+            city_prep,
+            date_display,
+            guests,
         )
     else:
         await _finalize_paid_registration(
-            message, state, app, user_id, username, full_name, graduate_type,
-            graduation_year, selected_event, event_id_for_db, city_prep, date_display, guests,
+            message,
+            state,
+            app,
+            user_id,
+            username,
+            full_name,
+            graduate_type,
+            graduation_year,
+            selected_event,
+            event_id_for_db,
+            city_prep,
+            date_display,
+            guests,
         )
 
 
@@ -1157,7 +1279,9 @@ async def register_user(
     if selected_event is None and location is None:
         return
 
-    reg_city_name = selected_event["city"] if selected_event else (location if location else "")
+    reg_city_name = (
+        selected_event["city"] if selected_event else (location if location else "")
+    )
 
     full_name, graduation_year, class_letter, graduate_type = await _collect_user_info(
         message, state, app, user_id, username, reuse_info, reg_city_name
@@ -1165,7 +1289,9 @@ async def register_user(
     if full_name is None:
         return
 
-    target_city_value = location if location else (selected_event["city"] if selected_event else "")
+    target_city_value = (
+        location if location else (selected_event["city"] if selected_event else "")
+    )
 
     if not all([full_name, graduation_year is not None, class_letter, graduate_type]):
         logger.error(
@@ -1191,13 +1317,31 @@ async def register_user(
     await app.save_registered_user(registered_user, user_id=user_id, username=username)
 
     guests = await _collect_guests_step(
-        message, state, app, selected_event, graduation_year, graduate_type, user_id, username
+        message,
+        state,
+        app,
+        selected_event,
+        graduation_year,
+        graduate_type,
+        user_id,
+        username,
     )
 
     await _save_and_log_registration(
-        app, message, state, user_id, username,
-        full_name, graduation_year, class_letter, graduate_type,
-        selected_event, location, reg_city_name, target_city_value, guests,
+        app,
+        message,
+        state,
+        user_id,
+        username,
+        full_name,
+        graduation_year,
+        class_letter,
+        graduate_type,
+        selected_event,
+        location,
+        reg_city_name,
+        target_city_value,
+        guests,
     )
 
 
@@ -1260,7 +1404,9 @@ async def cancel_registration_handler(message: Message, state: FSMContext, app: 
         await _cancel_one_of_many_registrations(message, state, app, registrations)
 
 
-async def _cancel_single_registration(message: Message, state: FSMContext, app: App, reg):
+async def _cancel_single_registration(
+    message: Message, state: FSMContext, app: App, reg
+):
     assert message.from_user is not None
     user_id = message.from_user.id
     city = reg["target_city"]
@@ -1381,7 +1527,9 @@ async def info_handler(message: Message, state: FSMContext, app: App):
     active_events = await app.get_active_events()
 
     if not active_events:
-        info_text += "Все встречи выпускников уже прошли. Спасибо, что были с нами! 🎓\n\n"
+        info_text += (
+            "Все встречи выпускников уже прошли. Спасибо, что были с нами! 🎓\n\n"
+        )
         info_text += "Следите за новостями в группе школы, чтобы не пропустить следующие встречи."
         await send_safe(message.chat.id, info_text, parse_mode="HTML")
         return
@@ -1390,7 +1538,9 @@ async def info_handler(message: Message, state: FSMContext, app: App):
     for event in active_events:
         info_text += f"<b>🏙️ {event.get('name', event.get('city', ''))}</b>\n"
         if app.is_event_passed(event):
-            info_text += f"📆 Дата: {event.get('date_display', '')} (встреча уже прошла)\n"
+            info_text += (
+                f"📆 Дата: {event.get('date_display', '')} (встреча уже прошла)\n"
+            )
         else:
             has_upcoming = True
             info_text += f"📆 Дата: {event.get('date_display', '')}\n"
@@ -1398,7 +1548,9 @@ async def info_handler(message: Message, state: FSMContext, app: App):
             venue = event.get("venue")
             address = event.get("address")
             info_text += f"🏢 Место: {venue}\n" if venue else "🏢 Место: Уточняется\n"
-            info_text += f"📍 Адрес: {address}\n" if address else "📍 Адрес: Уточняется\n"
+            info_text += (
+                f"📍 Адрес: {address}\n" if address else "📍 Адрес: Уточняется\n"
+            )
         info_text += "\n"
 
     if has_upcoming:
@@ -1428,7 +1580,9 @@ def _format_payment_status_line(reg: Dict, event, graduate_type: str) -> str:
         return "💰 Оплата: За свой счет\n"
 
     payment_status = reg.get("payment_status", "не оплачено")
-    line = f"💰 Статус оплаты: {_payment_status_emoji(payment_status)} {payment_status}\n"
+    line = (
+        f"💰 Статус оплаты: {_payment_status_emoji(payment_status)} {payment_status}\n"
+    )
     if "payment_amount" in reg:
         line += f"💵 Сумма оплаты: {reg['payment_amount']} руб.\n"
     elif payment_status == "pending" and "discounted_payment_amount" in reg:
@@ -1454,7 +1608,9 @@ def _format_registration_status_text(registrations, events_by_reg, app: App) -> 
         if grad_line:
             status_text += grad_line
         else:
-            status_text += f"🎓 Выпуск: {reg['graduation_year']} {reg['class_letter']}\n"
+            status_text += (
+                f"🎓 Выпуск: {reg['graduation_year']} {reg['class_letter']}\n"
+            )
 
         status_text += _format_payment_status_line(reg, event, graduate_type)
         status_text += "\n"
@@ -1492,7 +1648,9 @@ async def status_handler(message: Message, state: FSMContext, app: App):
     upcoming = [e for e in enabled_events if not app.is_event_passed(e)]
     if upcoming:
         status_text += "Доступные команды:\n"
-        status_text += "- /info - подробная информация о встречах (дата, время, адрес)\n"
+        status_text += (
+            "- /info - подробная информация о встречах (дата, время, адрес)\n"
+        )
         status_text += "- /start - управление регистрациями\n"
         status_text += "- /pay - оплатить участие\n"
         status_text += "- /cancel_registration - отменить регистрацию\n"
@@ -1518,7 +1676,9 @@ async def _status_no_registrations(message: Message, app: App):
         for e in upcoming:
             upcoming_text += f"- {e['city']} ({e.get('date_display', '')})\n"
         upcoming_text += "\nИспользуйте /start для регистрации на встречу."
-        await send_safe(message.chat.id, upcoming_text, reply_markup=ReplyKeyboardRemove())
+        await send_safe(
+            message.chat.id, upcoming_text, reply_markup=ReplyKeyboardRemove()
+        )
 
 
 async def _show_single_event_welcome(
@@ -1553,11 +1713,17 @@ async def _show_single_event_welcome(
         )
         return
     reuse_info = existing_registration if existing_registration else None
-    await register_user(message, state, app, preselected_city=event["city"], reuse_info=reuse_info)
+    await register_user(
+        message, state, app, preselected_city=event["city"], reuse_info=reuse_info
+    )
 
 
 async def _show_multi_event_welcome(
-    message: Message, state: FSMContext, app: App, upcoming_events, existing_registration
+    message: Message,
+    state: FSMContext,
+    app: App,
+    upcoming_events,
+    existing_registration,
 ):
     events_text = "👋 Добро пожаловать!\n\nБлижайшие встречи выпускников:\n\n"
     for event in upcoming_events:

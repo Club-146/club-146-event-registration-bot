@@ -136,9 +136,7 @@ def _combine_grad_type_stats(active_grad_stats, deleted_grad_stats):
 
 _PAYMENT_STATUS_PIPELINE_FIELDS = {
     "confirmed_count": {
-        "$sum": {
-            "$cond": [{"$eq": ["$payment_status", "confirmed"]}, 1, 0]
-        }
+        "$sum": {"$cond": [{"$eq": ["$payment_status", "confirmed"]}, 1, 0]}
     },
     "pending_count": {
         "$sum": {
@@ -150,9 +148,7 @@ _PAYMENT_STATUS_PIPELINE_FIELDS = {
         }
     },
     "declined_count": {
-        "$sum": {
-            "$cond": [{"$eq": ["$payment_status", "declined"]}, 1, 0]
-        }
+        "$sum": {"$cond": [{"$eq": ["$payment_status", "declined"]}, 1, 0]}
     },
     "unpaid_count": {
         "$sum": {
@@ -315,42 +311,52 @@ def _extract_deleted_counts(deleted_stat) -> dict:
 def _format_simple_totals(totals: dict, PAYMENT_STATUS_MAP) -> list:
     """Format global totals section for _format_simple_payment_section."""
     lines = ["\n<b>Всего по статусам:</b>", "<u>Активные пользователи:</u>"]
-    lines.append(f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{totals['active_confirmed']}</b>")
-    lines.append(f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{totals['active_pending']}</b>")
-    not_paid = totals['active_declined'] + totals['active_unpaid']
+    lines.append(
+        f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{totals['active_confirmed']}</b>"
+    )
+    lines.append(
+        f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{totals['active_pending']}</b>"
+    )
+    not_paid = totals["active_declined"] + totals["active_unpaid"]
     lines.append(f"⚪️ {PAYMENT_STATUS_MAP[None]}: <b>{not_paid}</b>")
 
-    if totals['deleted_confirmed'] > 0 or totals['deleted_pending'] > 0:
+    if totals["deleted_confirmed"] > 0 or totals["deleted_pending"] > 0:
         lines.append("\n<u>Удаленные пользователи с оплатами:</u>")
-        if totals['deleted_confirmed'] > 0:
-            lines.append(f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{totals['deleted_confirmed']}</b>")
-        if totals['deleted_pending'] > 0:
-            lines.append(f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{totals['deleted_pending']}</b>")
+        if totals["deleted_confirmed"] > 0:
+            lines.append(
+                f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{totals['deleted_confirmed']}</b>"
+            )
+        if totals["deleted_pending"] > 0:
+            lines.append(
+                f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{totals['deleted_pending']}</b>"
+            )
 
-    total_paid = totals['paid_active'] + totals['paid_deleted']
+    total_paid = totals["paid_active"] + totals["paid_deleted"]
     if total_paid > 0:
         deleted_pct = f" ({totals['paid_deleted'] / total_paid:.1%} от удаленных)"
         lines.append(f"\n<b>💵 Итого собрано: {total_paid:,} руб.</b>{deleted_pct}")
     return lines
 
 
-def _format_city_payment_block_simple(
-    ac: dict, dc: dict, PAYMENT_STATUS_MAP
-) -> list:
+def _format_city_payment_block_simple(ac: dict, dc: dict, PAYMENT_STATUS_MAP) -> list:
     """Format per-city lines for simple payment section."""
     lines = []
     total_active = ac["confirmed"] + ac["pending"] + ac["declined"] + ac["unpaid"]
     if total_active > 0:
         lines.append(f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{ac['confirmed']}</b>")
         lines.append(f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{ac['pending']}</b>")
-        lines.append(f"⚪️ {PAYMENT_STATUS_MAP[None]}: <b>{ac['declined'] + ac['unpaid']}</b>")
+        lines.append(
+            f"⚪️ {PAYMENT_STATUS_MAP[None]}: <b>{ac['declined'] + ac['unpaid']}</b>"
+        )
     else:
         lines.append("Нет активных пользователей")
 
     if dc["confirmed"] > 0 or dc["pending"] > 0:
         lines.append("\n<u>Удаленные пользователи с оплатами:</u>")
         if dc["confirmed"] > 0:
-            lines.append(f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{dc['confirmed']}</b>")
+            lines.append(
+                f"✅ {PAYMENT_STATUS_MAP['confirmed']}: <b>{dc['confirmed']}</b>"
+            )
         if dc["pending"] > 0:
             lines.append(f"⏳ {PAYMENT_STATUS_MAP['pending']}: <b>{dc['pending']}</b>")
 
@@ -363,13 +369,19 @@ def _format_city_payment_block_simple(
     return lines
 
 
-def _format_simple_payment_section(payment_stats_combined, event_name_map, PAYMENT_STATUS_MAP):
+def _format_simple_payment_section(
+    payment_stats_combined, event_name_map, PAYMENT_STATUS_MAP
+):
     lines = ["<b>💰 Статусы оплат:</b>"]
     totals = {
-        "active_confirmed": 0, "active_pending": 0,
-        "active_declined": 0, "active_unpaid": 0,
-        "deleted_confirmed": 0, "deleted_pending": 0,
-        "paid_active": 0, "paid_deleted": 0,
+        "active_confirmed": 0,
+        "active_pending": 0,
+        "active_declined": 0,
+        "active_unpaid": 0,
+        "deleted_confirmed": 0,
+        "deleted_pending": 0,
+        "paid_active": 0,
+        "paid_deleted": 0,
     }
 
     for eid, stats in sorted(
@@ -392,11 +404,16 @@ def _format_simple_payment_section(payment_stats_combined, event_name_map, PAYME
         lines.append(f"\n<b>{city_name}:</b>")
         lines.extend(_format_city_payment_block_simple(ac, dc, PAYMENT_STATUS_MAP))
 
-    total_with_payment = sum([
-        totals["active_confirmed"], totals["active_pending"],
-        totals["active_declined"], totals["active_unpaid"],
-        totals["deleted_confirmed"], totals["deleted_pending"],
-    ])
+    total_with_payment = sum(
+        [
+            totals["active_confirmed"],
+            totals["active_pending"],
+            totals["active_declined"],
+            totals["active_unpaid"],
+            totals["deleted_confirmed"],
+            totals["deleted_pending"],
+        ]
+    )
     if total_with_payment > 0:
         lines.extend(_format_simple_totals(totals, PAYMENT_STATUS_MAP))
 
@@ -425,8 +442,11 @@ def _format_city_payment_block_full(
 
 
 def _format_full_totals(
-    total_paid_active, total_paid_deleted,
-    all_ratios_formula, all_ratios_regular, all_ratios_discounted
+    total_paid_active,
+    total_paid_deleted,
+    all_ratios_formula,
+    all_ratios_regular,
+    all_ratios_discounted,
 ) -> list:
     """Format global totals footer for full payment section."""
     total_paid = total_paid_active + total_paid_deleted
@@ -441,7 +461,9 @@ def _format_full_totals(
     ]
 
 
-def _format_full_payment_section(payment_stats_combined, event_name_map, PAYMENT_STATUS_MAP):
+def _format_full_payment_section(
+    payment_stats_combined, event_name_map, PAYMENT_STATUS_MAP
+):
     lines = ["<b>💰 Статистика оплат:</b>"]
     total_paid_active = 0
     total_paid_deleted = 0
@@ -471,12 +493,21 @@ def _format_full_payment_section(payment_stats_combined, event_name_map, PAYMENT
 
         city_name = event_name_map.get(eid, eid or "Неизвестно")
         lines.append(f"\n<b>{city_name}:</b>")
-        lines.extend(_format_city_payment_block_full(active_stat, deleted_stat, rf, rr, rd, PAYMENT_STATUS_MAP))
+        lines.extend(
+            _format_city_payment_block_full(
+                active_stat, deleted_stat, rf, rr, rd, PAYMENT_STATUS_MAP
+            )
+        )
 
-    lines.extend(_format_full_totals(
-        total_paid_active, total_paid_deleted,
-        all_ratios_formula, all_ratios_regular, all_ratios_discounted,
-    ))
+    lines.extend(
+        _format_full_totals(
+            total_paid_active,
+            total_paid_deleted,
+            all_ratios_formula,
+            all_ratios_regular,
+            all_ratios_discounted,
+        )
+    )
     return "\n".join(lines)
 
 
@@ -551,9 +582,12 @@ async def show_stats(message: Message, app: App):
 
     stats_text = "<b>📊 Статистика регистраций</b> (включая удаленных)\n\n"
 
-    all_events, event_name_map, enabled_event_ids, free_event_ids = (
-        await _fetch_event_metadata(app)
-    )
+    (
+        all_events,
+        event_name_map,
+        enabled_event_ids,
+        free_event_ids,
+    ) = await _fetch_event_metadata(app)
 
     # City stats
     active_city_stats, deleted_city_stats = await _fetch_city_counts(app)
@@ -586,7 +620,9 @@ async def show_stats(message: Message, app: App):
 
     # Grad type stats
     active_grad_stats, deleted_grad_stats = await _fetch_grad_type_stats(app)
-    grad_stats_combined = _combine_grad_type_stats(active_grad_stats, deleted_grad_stats)
+    grad_stats_combined = _combine_grad_type_stats(
+        active_grad_stats, deleted_grad_stats
+    )
     stats_text += _format_grad_type_section(grad_stats_combined)
     stats_text += "\n\n"
 
@@ -594,7 +630,9 @@ async def show_stats(message: Message, app: App):
     active_payment_stats, deleted_payment_stats = await _fetch_payment_stats(
         app, free_event_ids, include_amounts=True
     )
-    payment_stats_combined = _combine_stat_pairs(active_payment_stats, deleted_payment_stats)
+    payment_stats_combined = _combine_stat_pairs(
+        active_payment_stats, deleted_payment_stats
+    )
     payment_stats_combined = {
         k: v for k, v in payment_stats_combined.items() if k in enabled_event_ids
     }
@@ -615,9 +653,12 @@ async def show_simple_stats(message: Message, app: App):
 
     stats_text = "<b>📊 Краткая статистика регистраций</b> (включая удаленных)\n\n"
 
-    all_events, event_name_map, enabled_event_ids, free_event_ids = (
-        await _fetch_event_metadata(app)
-    )
+    (
+        all_events,
+        event_name_map,
+        enabled_event_ids,
+        free_event_ids,
+    ) = await _fetch_event_metadata(app)
 
     # City stats
     active_city_stats, deleted_city_stats = await _fetch_city_counts(app)
@@ -631,7 +672,9 @@ async def show_simple_stats(message: Message, app: App):
 
     # Grad type stats
     active_grad_stats, deleted_grad_stats = await _fetch_grad_type_stats(app)
-    grad_stats_combined = _combine_grad_type_stats(active_grad_stats, deleted_grad_stats)
+    grad_stats_combined = _combine_grad_type_stats(
+        active_grad_stats, deleted_grad_stats
+    )
     stats_text += _format_grad_type_section(grad_stats_combined)
     stats_text += "\n\n"
 
@@ -639,7 +682,9 @@ async def show_simple_stats(message: Message, app: App):
     active_payment_stats, deleted_payment_stats = await _fetch_payment_stats(
         app, free_event_ids, include_amounts=False
     )
-    payment_stats_combined = _combine_stat_pairs(active_payment_stats, deleted_payment_stats)
+    payment_stats_combined = _combine_stat_pairs(
+        active_payment_stats, deleted_payment_stats
+    )
     payment_stats_combined = {
         k: v for k, v in payment_stats_combined.items() if k in enabled_event_ids
     }
@@ -663,9 +708,7 @@ async def show_year_stats(message: Message, app: App):
         message.chat.id, "⏳ Генерация статистики по годам выпуска..."
     )
 
-    cursor = app.collection.find(
-        {"graduation_year": {"$exists": True, "$ne": 0}}
-    )
+    cursor = app.collection.find({"graduation_year": {"$exists": True, "$ne": 0}})
     active_registrations = await cursor.to_list(length=None)
 
     deleted_cursor = app.deleted_users.find(
@@ -760,7 +803,9 @@ def _build_periods(all_years):
     return periods, period_labels
 
 
-def _aggregate_period_counts(cities, city_year_counts, city_year_counts_deleted, periods):
+def _aggregate_period_counts(
+    cities, city_year_counts, city_year_counts_deleted, periods
+):
     period_counts = {city: [0] * len(periods) for city in cities}
     period_counts_deleted = {city: [0] * len(periods) for city in cities}
 
@@ -779,7 +824,9 @@ def _aggregate_period_counts(cities, city_year_counts, city_year_counts_deleted,
     return period_counts, period_counts_deleted
 
 
-def _format_year_stats_text(cities, period_labels, period_counts, period_counts_deleted):
+def _format_year_stats_text(
+    cities, period_labels, period_counts, period_counts_deleted
+):
     lines = [
         "<b>📊 Статистика регистраций по годам выпуска</b> (текст включает удаленных)\n",
         "<b>🎓 По периодам (все города):</b>",
@@ -832,9 +879,7 @@ async def show_five_year_stats(message: Message, app: App):
         message.chat.id, "⏳ Генерация графика по пятилеткам выпуска..."
     )
 
-    cursor = app.collection.find(
-        {"graduation_year": {"$exists": True, "$ne": 0}}
-    )
+    cursor = app.collection.find({"graduation_year": {"$exists": True, "$ne": 0}})
     active_registrations = await cursor.to_list(length=None)
 
     deleted_cursor = app.deleted_users.find(

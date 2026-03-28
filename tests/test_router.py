@@ -419,7 +419,14 @@ def test_format_registration_status_text_single():
             "payment_amount": 2000,
         }
     ]
-    events = [{"date_display": "21 Марта", "city": "Москва", "pricing_type": "formula", "free_for_types": []}]
+    events = [
+        {
+            "date_display": "21 Марта",
+            "city": "Москва",
+            "pricing_type": "formula",
+            "free_for_types": [],
+        }
+    ]
 
     result = _format_registration_status_text(registrations, events, mock_app)
     assert "Москва" in result

@@ -498,7 +498,9 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
         await send_safe(message.chat.id, "Операция отменена.")
         return
 
-    pricing_choice = "formula" if pricing_data.get("pricing_type") == PricingType.FORMULA else "free"
+    pricing_choice = (
+        "formula" if pricing_data.get("pricing_type") == PricingType.FORMULA else "free"
+    )
 
     event_data = {
         "name": event_name,
@@ -515,13 +517,9 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
     }
     event_data.update(pricing_data)
 
-    event_data["free_for_types"] = await _collect_free_for_types(
-        message.chat.id, state
-    )
+    event_data["free_for_types"] = await _collect_free_for_types(message.chat.id, state)
 
-    early_bird_data = await _collect_early_bird(
-        message.chat.id, state, pricing_choice
-    )
+    early_bird_data = await _collect_early_bird(message.chat.id, state, pricing_choice)
     event_data.update(early_bird_data)
 
     guest_data = await _collect_guest_settings(message.chat.id, state)
@@ -665,8 +663,7 @@ async def _handle_edit_field_date(
 ) -> None:
     resp = await ask_user_raw(
         chat_id,
-        f"Текущая дата: {event.get('date_display')}\n"
-        f"Введите новую дату (ДД.ММ.ГГГГ):",
+        f"Текущая дата: {event.get('date_display')}\nВведите новую дату (ДД.ММ.ГГГГ):",
         state=state,
         timeout=None,
     )
@@ -675,9 +672,7 @@ async def _handle_edit_field_date(
             new_date = datetime.strptime(resp.text.strip(), "%d.%m.%Y")
             old_date = event.get("date")
             if old_date:
-                new_date = new_date.replace(
-                    hour=old_date.hour, minute=old_date.minute
-                )
+                new_date = new_date.replace(hour=old_date.hour, minute=old_date.minute)
             await app.update_event(
                 event_id,
                 {

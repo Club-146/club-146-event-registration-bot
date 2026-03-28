@@ -204,7 +204,9 @@ async def _ask_rating_step(
     )
 
     if rating == "cancel":
-        await save_feedback_and_thank(message, state, app, feedback_data, is_cancel=True)
+        await save_feedback_and_thank(
+            message, state, app, feedback_data, is_cancel=True
+        )
         return False
 
     if rating == "skip":
@@ -229,9 +231,7 @@ async def _ask_rating_step(
     return True
 
 
-async def _ask_attended_city(
-    message, state, app: App, feedback_data: dict
-) -> tuple:
+async def _ask_attended_city(message, state, app: App, feedback_data: dict) -> tuple:
     """Ask attended city. Returns (city, should_continue). city=None means skipped."""
     city_choices = {}
     all_events = await app.get_all_events()
@@ -255,7 +255,9 @@ async def _ask_attended_city(
     )
 
     if city == "cancel":
-        await save_feedback_and_thank(message, state, app, feedback_data, is_cancel=True)
+        await save_feedback_and_thank(
+            message, state, app, feedback_data, is_cancel=True
+        )
         return None, False
 
     if city == "skip":
@@ -290,7 +292,9 @@ async def _ask_help_interest(
     )
 
     if help_interest == "cancel":
-        await save_feedback_and_thank(message, state, app, feedback_data, is_cancel=True)
+        await save_feedback_and_thank(
+            message, state, app, feedback_data, is_cancel=True
+        )
         return False
 
     if help_interest == "skip":
@@ -349,7 +353,9 @@ async def _ask_feedback_format(
     )
 
     if feedback_format == "cancel":
-        await save_feedback_and_thank(message, state, app, feedback_data, is_cancel=True)
+        await save_feedback_and_thank(
+            message, state, app, feedback_data, is_cancel=True
+        )
         return False
 
     if feedback_format == "skip":
@@ -408,7 +414,9 @@ async def feedback_handler(message: Message, state: FSMContext, app: App):
     )
 
     if attendance == "cancel":
-        await save_feedback_and_thank(message, state, app, feedback_data, is_cancel=True)
+        await save_feedback_and_thank(
+            message, state, app, feedback_data, is_cancel=True
+        )
         return
 
     feedback_data["attended"] = attendance == "yes"
@@ -435,7 +443,10 @@ async def feedback_handler(message: Message, state: FSMContext, app: App):
 
     # Step 3: recommendation
     ok = await _ask_rating_step(
-        message, state, app, feedback_data,
+        message,
+        state,
+        app,
+        feedback_data,
         question=(
             "Круто! Насколько ты бы порекомендовал своим одноклассникам участвовать в следующем году?\n\n"
             "1 - лучше заняться чем-то другим\n"
@@ -457,7 +468,10 @@ async def feedback_handler(message: Message, state: FSMContext, app: App):
 
     # Step 4: venue
     ok = await _ask_rating_step(
-        message, state, app, feedback_data,
+        message,
+        state,
+        app,
+        feedback_data,
         question=(
             "Насколько тебе понравилась площадка?\n\n"
             "1 - совсем не понравилась\n"
@@ -476,7 +490,10 @@ async def feedback_handler(message: Message, state: FSMContext, app: App):
 
     # Step 5: food
     ok = await _ask_rating_step(
-        message, state, app, feedback_data,
+        message,
+        state,
+        app,
+        feedback_data,
         question=(
             "Насколько понравилась еда и напитки?\n\n"
             "1 - несъедобно\n"
@@ -495,7 +512,10 @@ async def feedback_handler(message: Message, state: FSMContext, app: App):
 
     # Step 6: entertainment
     ok = await _ask_rating_step(
-        message, state, app, feedback_data,
+        message,
+        state,
+        app,
+        feedback_data,
         question=(
             "Насколько понравились развлекательные мероприятия?\n\n"
             "1 - в следующей раз не буду участвовать ни за какие коврижки\n"
@@ -513,14 +533,18 @@ async def feedback_handler(message: Message, state: FSMContext, app: App):
         return
 
     # Step 7: help interest
-    if not await _ask_help_interest(message, state, app, feedback_data, city, user_id, username):
+    if not await _ask_help_interest(
+        message, state, app, feedback_data, city, user_id, username
+    ):
         return
 
     # Step 8: comments
     await _ask_comments(message, state, feedback_data)
 
     # Step 9: feedback format
-    if not await _ask_feedback_format(message, state, app, feedback_data, user_id, username):
+    if not await _ask_feedback_format(
+        message, state, app, feedback_data, user_id, username
+    ):
         return
 
     await save_feedback_and_thank(message, state, app, feedback_data)

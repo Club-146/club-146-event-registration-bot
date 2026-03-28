@@ -65,7 +65,14 @@ def apply_message_templates(
 
 
 _TEMPLATE_MARKERS = [
-    "{name}", "{city}", "{city_padezh}", "{address}", "{venue}", "{time}", "{year}", "{class}",
+    "{name}",
+    "{city}",
+    "{city_padezh}",
+    "{address}",
+    "{venue}",
+    "{time}",
+    "{year}",
+    "{class}",
 ]
 
 
@@ -87,7 +94,9 @@ def _resolve_city_name(city: str, event_map: dict) -> str:
     if city == "all" or not city:
         return "всех городах"
     if city in event_map:
-        return event_map[city].get("city_prepositional", event_map[city].get("city", city))
+        return event_map[city].get(
+            "city_prepositional", event_map[city].get("city", city)
+        )
     return city
 
 
@@ -111,8 +120,12 @@ async def _build_notify_preview(
     if users and any(m in notification_text for m in _TEMPLATE_MARKERS):
         example_user = users[0]
         example_event = await app.get_event_for_registration(example_user)
-        personalized_example = apply_message_templates(notification_text, example_user, example_event)
-        preview += "\n\n<b>Пример персонализированного сообщения для пользователя:</b>\n"
+        personalized_example = apply_message_templates(
+            notification_text, example_user, example_event
+        )
+        preview += (
+            "\n\n<b>Пример персонализированного сообщения для пользователя:</b>\n"
+        )
         preview += f"<i>{example_user.get('full_name', '')}</i>\n\n"
         preview += personalized_example
 
@@ -141,9 +154,7 @@ def _build_validation_report(
     return report
 
 
-async def _send_notify_messages(
-    app: App, users: list, notification_text: str
-) -> tuple:
+async def _send_notify_messages(app: App, users: list, notification_text: str) -> tuple:
     sent_count = 0
     failed_count = 0
     for user in users:
@@ -153,7 +164,9 @@ async def _send_notify_messages(
             continue
         try:
             user_event = await app.get_event_for_registration(user)
-            personalized_text = apply_message_templates(notification_text, user, user_event)
+            personalized_text = apply_message_templates(
+                notification_text, user, user_event
+            )
             await send_safe(user_id, personalized_text)
             sent_count += 1
             validation_message = (
@@ -241,17 +254,23 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
         await send_safe(message.chat.id, "Операция отменена")
         return
 
-    status_msg = await send_safe(message.chat.id, "⏳ Получение списка пользователей...")
+    status_msg = await send_safe(
+        message.chat.id, "⏳ Получение списка пользователей..."
+    )
 
     city_filter = city if city != "all" else None
     users, audience_name = await _get_notify_users(app, audience, city_filter)
 
     if not users:
-        await status_msg.edit_text("❌ Пользователи, соответствующие критериям, не найдены!")
+        await status_msg.edit_text(
+            "❌ Пользователи, соответствующие критериям, не найдены!"
+        )
         return
 
     city_name = _resolve_city_name(city, event_map)
-    preview = await _build_notify_preview(app, users, audience_name, city_name, notification_text)
+    preview = await _build_notify_preview(
+        app, users, audience_name, city_name, notification_text
+    )
     await status_msg.edit_text(preview)
 
     # Step 4: confirm
@@ -265,11 +284,15 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
         return
 
     initiator = message.from_user.username or message.from_user.id
-    validation_report = _build_validation_report(users, initiator, audience_name, city_name, notification_text)
+    validation_report = _build_validation_report(
+        users, initiator, audience_name, city_name, notification_text
+    )
     await app.log_to_chat(validation_report, "events")
 
     status_msg = await send_safe(message.chat.id, "⏳ Отправка уведомлений...")
-    sent_count, failed_count = await _send_notify_messages(app, users, notification_text)
+    sent_count, failed_count = await _send_notify_messages(
+        app, users, notification_text
+    )
 
     await status_msg.edit_text(
         f"✅ Уведомления отправлены!\n\n"
@@ -279,7 +302,9 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
     )
 
 
-async def _build_recipient_list(app, audience: str, city_filter: str, event_map: dict) -> list:
+async def _build_recipient_list(
+    app, audience: str, city_filter: str, event_map: dict
+) -> list:
     """Resolve the list of target user IDs for announce_new_season_handler."""
     if audience == "all_time":
         if city_filter == "all":
@@ -288,8 +313,12 @@ async def _build_recipient_list(app, audience: str, city_filter: str, event_map:
             return list(active_ids | deleted_ids)
         ev = event_map.get(city_filter, {})
         city = ev.get("city", "")
-        active_ids = set(await app.collection.distinct("user_id", {"target_city": city}))
-        deleted_ids = set(await app.deleted_users.distinct("user_id", {"target_city": city}))
+        active_ids = set(
+            await app.collection.distinct("user_id", {"target_city": city})
+        )
+        deleted_ids = set(
+            await app.deleted_users.distinct("user_id", {"target_city": city})
+        )
         return list(active_ids | deleted_ids)
     # current
     if city_filter == "all":
@@ -316,9 +345,7 @@ def _build_default_announcement(enabled_events: list, post_link: str) -> str:
     return msg
 
 
-async def _get_announcement_text(
-    message, state, default_message: str
-) -> Optional[str]:
+async def _get_announcement_text(message, state, default_message: str) -> Optional[str]:
     """Ask user to keep default message or enter a custom one. Returns text or None on cancel."""
     custom_resp = await ask_user_choice(
         message.chat.id,
@@ -439,7 +466,9 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
         return
 
     audience_desc = (
-        "все пользователи за всё время" if audience == "all_time" else "текущие зарегистрированные"
+        "все пользователи за всё время"
+        if audience == "all_time"
+        else "текущие зарегистрированные"
     )
     if city_filter != "all" and city_filter in event_map:
         audience_desc += f" ({event_map[city_filter].get('city', city_filter)})"
@@ -465,7 +494,9 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
     )
 
     status_msg = await send_safe(message.chat.id, "⏳ Отправка анонса...")
-    sent_count, failed_count = await _send_announcements(target_user_ids, announcement_text)
+    sent_count, failed_count = await _send_announcements(
+        target_user_ids, announcement_text
+    )
 
     await status_msg.edit_text(
         f"✅ Анонс отправлен!\n\n"
