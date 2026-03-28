@@ -156,69 +156,60 @@ def _make_date_display(dt: datetime) -> str:
 
 
 # ---------------------------------------------------------------------------
-# /create_event
+# create_event helpers
 # ---------------------------------------------------------------------------
 
 
-@commands_menu.add_command(
-    "create_event", "Создать новую встречу", visibility=Visibility.ADMIN_ONLY
-)
-@events_router.message(Command("create_event"), AdminFilter())
-async def create_event_handler(message: Message, state: FSMContext, app: App):
-    """Guided event creation flow (admin only)."""
-    if not message.from_user:
-        return
-
-    # Step 1: City
+async def _collect_city(chat_id: int, state: FSMContext) -> tuple[str, str] | None:
+    """Ask for city name and its prepositional form. Returns (city, city_prep) or None."""
     city_resp = await ask_user_raw(
-        message.chat.id,
+        chat_id,
         '🏙️ В каком городе будет встреча?\nВведите название города (например, "Москва"):',
         state=state,
         timeout=None,
     )
     if not city_resp or not city_resp.text:
-        await send_safe(message.chat.id, "Операция отменена.")
-        return
+        return None
     city = city_resp.text.strip()
 
-    # Step 2: City prepositional
     city_prep = CITY_PREPOSITIONAL_MAP.get(city)
     if not city_prep:
         prep_resp = await ask_user_raw(
-            message.chat.id,
+            chat_id,
             f'Не могу автоматически просклонять "{city}".\n'
             f'Как сказать "в ___"? (например, для Москвы → "Москве")',
             state=state,
             timeout=None,
         )
         if not prep_resp or not prep_resp.text:
-            await send_safe(message.chat.id, "Операция отменена.")
-            return
+            return None
         city_prep = prep_resp.text.strip()
 
-    # Step 3: Date
+    return city, city_prep
+
+
+async def _collect_date_and_name(
+    chat_id: int, state: FSMContext, city: str
+) -> tuple[datetime, str, str] | None:
+    """Ask for date, time, and name. Returns (event_date, time_display, event_name) or None."""
     date_resp = await ask_user_raw(
-        message.chat.id,
+        chat_id,
         "🗓️ Укажите дату встречи (ДД.ММ.ГГГГ):",
         state=state,
         timeout=None,
     )
     if not date_resp or not date_resp.text:
-        await send_safe(message.chat.id, "Операция отменена.")
-        return
+        return None
 
     try:
         event_date = datetime.strptime(date_resp.text.strip(), "%d.%m.%Y")
     except ValueError:
-        await send_safe(
-            message.chat.id, "❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ"
-        )
-        return
+        await send_safe(chat_id, "❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ")
+        return None
 
-    # Step 4: Name suggestion
     suggested_name = _suggest_event_name(city, event_date)
     name_resp = await ask_user_raw(
-        message.chat.id,
+        chat_id,
         f'📝 Как назвать встречу?\nПредлагаю: "{suggested_name}"\n'
         f'Нажмите Enter или введите своё название (или отправьте "ок" чтобы принять):',
         state=state,
@@ -233,19 +224,16 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
         else:
             event_name = text
 
-    # Step 5: Time
     time_resp = await ask_user_raw(
-        message.chat.id,
+        chat_id,
         '🕐 Укажите время начала (например, "18:00" или "18:00-24:00"):',
         state=state,
         timeout=None,
     )
     if not time_resp or not time_resp.text:
-        await send_safe(message.chat.id, "Операция отменена.")
-        return
+        return None
     time_display = time_resp.text.strip()
 
-    # Parse hour for the event datetime
     try:
         hour = int(time_display.split(":")[0])
         minute = (
@@ -253,11 +241,17 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
         )
         event_date = event_date.replace(hour=hour, minute=minute)
     except (ValueError, IndexError):
-        pass  # Keep date without time if parsing fails
+        pass
 
-    # Step 6: Venue (optional)
+    return event_date, time_display, event_name
+
+
+async def _collect_venue_info(
+    chat_id: int, state: FSMContext
+) -> tuple[str | None, str | None]:
+    """Ask for venue and address. Returns (venue, address)."""
     venue_resp = await ask_user_raw(
-        message.chat.id,
+        chat_id,
         '📍 Укажите место проведения (или "пропустить"):',
         state=state,
         timeout=None,
@@ -268,9 +262,8 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
         if text.lower() not in ("пропустить", "skip", "-"):
             venue = text
 
-    # Step 7: Address (optional)
     address_resp = await ask_user_raw(
-        message.chat.id,
+        chat_id,
         '📍 Укажите адрес (или "пропустить"):',
         state=state,
         timeout=None,
@@ -281,9 +274,15 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
         if text.lower() not in ("пропустить", "skip", "-"):
             address = text
 
-    # Step 8: Pricing type
+    return venue, address
+
+
+async def _collect_pricing_config(
+    chat_id: int, state: FSMContext, event_date: datetime
+) -> dict | None:
+    """Ask for pricing type and formula params. Returns partial event_data dict or None on cancel."""
     pricing_choice = await ask_user_choice(
-        message.chat.id,
+        chat_id,
         "💰 Выберите тип оплаты:",
         choices={
             "formula": "Формула",
@@ -292,6 +291,214 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
         state=state,
         timeout=None,
     )
+
+    if pricing_choice != "formula":
+        return {"pricing_type": PricingType.FREE}
+
+    base_resp = await ask_user_raw(
+        chat_id,
+        "💰 Укажите базовую стоимость (в рублях):",
+        state=state,
+        timeout=None,
+    )
+    if not base_resp or not base_resp.text:
+        return None
+    try:
+        price_base = int(base_resp.text.strip())
+    except ValueError:
+        await send_safe(chat_id, "❌ Введите число.")
+        return None
+
+    rate_resp = await ask_user_raw(
+        chat_id,
+        "💰 Укажите надбавку за каждый год выпуска:",
+        state=state,
+        timeout=None,
+    )
+    if not rate_resp or not rate_resp.text:
+        return None
+    try:
+        price_rate = int(rate_resp.text.strip())
+    except ValueError:
+        await send_safe(chat_id, "❌ Введите число.")
+        return None
+
+    step_resp = await ask_user_raw(
+        chat_id,
+        "💰 Шаг группировки по годам (1 = каждый год, 3 = по 3 года). По умолчанию 1:",
+        state=state,
+        timeout=None,
+    )
+    price_step = 1
+    if step_resp and step_resp.text:
+        try:
+            price_step = max(1, int(step_resp.text.strip()))
+        except ValueError:
+            price_step = 1
+
+    return {
+        "pricing_type": PricingType.FORMULA,
+        "price_formula_base": price_base,
+        "price_formula_rate": price_rate,
+        "price_formula_reference_year": event_date.year,
+        "price_formula_step": price_step,
+    }
+
+
+async def _collect_free_for_types(chat_id: int, state: FSMContext) -> list[str]:
+    """Ask which participant types get free entry. Returns list of type strings."""
+    free_choice = await ask_user_choice(
+        chat_id,
+        "🎓 Для каких типов участников бесплатно?",
+        choices={
+            "teachers_organizers": "Учителя + Организаторы",
+            "teachers": "Только учителя",
+            "nobody": "Никто (все платят)",
+        },
+        state=state,
+        timeout=None,
+    )
+    if free_choice == "teachers_organizers":
+        return ["TEACHER", "ORGANIZER"]
+    elif free_choice == "teachers":
+        return ["TEACHER"]
+    return []
+
+
+async def _collect_early_bird(
+    chat_id: int, state: FSMContext, pricing_choice: str
+) -> dict:
+    """Ask for early bird discount settings. Returns partial event_data dict."""
+    if pricing_choice != "formula":
+        return {"early_bird_discount": 0, "early_bird_deadline": None}
+
+    eb_resp = await ask_user_raw(
+        chat_id,
+        "🐦 Скидка за раннюю регистрацию (в рублях, 0 = без скидки):",
+        state=state,
+        timeout=None,
+    )
+    early_bird_discount = 0
+    if eb_resp and eb_resp.text:
+        try:
+            early_bird_discount = max(0, int(eb_resp.text.strip()))
+        except ValueError:
+            early_bird_discount = 0
+
+    if early_bird_discount <= 0:
+        return {"early_bird_discount": 0, "early_bird_deadline": None}
+
+    deadline_resp = await ask_user_raw(
+        chat_id,
+        "🐦 Дедлайн ранней регистрации (ДД.ММ.ГГГГ):",
+        state=state,
+        timeout=None,
+    )
+    early_bird_deadline = None
+    if deadline_resp and deadline_resp.text:
+        try:
+            early_bird_deadline = datetime.strptime(
+                deadline_resp.text.strip(), "%d.%m.%Y"
+            )
+        except ValueError:
+            await send_safe(
+                chat_id,
+                "⚠️ Неверный формат даты, скидка будет без дедлайна.",
+            )
+
+    return {
+        "early_bird_discount": early_bird_discount,
+        "early_bird_deadline": early_bird_deadline,
+    }
+
+
+async def _collect_guest_settings(chat_id: int, state: FSMContext) -> dict:
+    """Ask for guest settings. Returns partial event_data dict."""
+    guests_choice = await ask_user_choice(
+        chat_id,
+        "👥 Разрешить участникам приводить гостей (+1)?",
+        choices={
+            "yes": "Да",
+            "no": "Нет",
+        },
+        state=state,
+        timeout=None,
+    )
+
+    if guests_choice != "yes":
+        return {
+            "guests_enabled": False,
+            "max_guests_per_person": 3,
+            "guest_price_minimum": 0,
+        }
+
+    max_guests_resp = await ask_user_raw(
+        chat_id,
+        "Максимальное количество гостей на человека (по умолчанию 3):",
+        state=state,
+        timeout=None,
+    )
+    max_guests = 3
+    if max_guests_resp and max_guests_resp.text:
+        try:
+            max_guests = max(1, int(max_guests_resp.text.strip()))
+        except ValueError:
+            max_guests = 3
+
+    min_price_resp = await ask_user_raw(
+        chat_id,
+        "Минимальная цена за гостя в рублях (0 = такая же, как у регистранта):",
+        state=state,
+        timeout=None,
+    )
+    min_price = 0
+    if min_price_resp and min_price_resp.text:
+        try:
+            min_price = max(0, int(min_price_resp.text.strip()))
+        except ValueError:
+            min_price = 0
+
+    return {
+        "guests_enabled": True,
+        "max_guests_per_person": max_guests,
+        "guest_price_minimum": min_price,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /create_event
+# ---------------------------------------------------------------------------
+
+
+@commands_menu.add_command(
+    "create_event", "Создать новую встречу", visibility=Visibility.ADMIN_ONLY
+)
+@events_router.message(Command("create_event"), AdminFilter())
+async def create_event_handler(message: Message, state: FSMContext, app: App):
+    """Guided event creation flow (admin only)."""
+    if not message.from_user:
+        return
+
+    city_result = await _collect_city(message.chat.id, state)
+    if not city_result:
+        await send_safe(message.chat.id, "Операция отменена.")
+        return
+    city, city_prep = city_result
+
+    date_result = await _collect_date_and_name(message.chat.id, state, city)
+    if not date_result:
+        await send_safe(message.chat.id, "Операция отменена.")
+        return
+    event_date, time_display, event_name = date_result
+
+    venue, address = await _collect_venue_info(message.chat.id, state)
+
+    pricing_data = await _collect_pricing_config(message.chat.id, state, event_date)
+    if pricing_data is None:
+        await send_safe(message.chat.id, "Операция отменена.")
+        return
+
+    pricing_choice = "formula" if pricing_data.get("pricing_type") == PricingType.FORMULA else "free"
 
     event_data = {
         "name": event_name,
@@ -306,170 +513,20 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
         "enabled": True,
         "free_for_types": [],
     }
+    event_data.update(pricing_data)
 
-    if pricing_choice == "formula":
-        base_resp = await ask_user_raw(
-            message.chat.id,
-            "💰 Укажите базовую стоимость (в рублях):",
-            state=state,
-            timeout=None,
-        )
-        if not base_resp or not base_resp.text:
-            await send_safe(message.chat.id, "Операция отменена.")
-            return
-        try:
-            price_base = int(base_resp.text.strip())
-        except ValueError:
-            await send_safe(message.chat.id, "❌ Введите число.")
-            return
-
-        rate_resp = await ask_user_raw(
-            message.chat.id,
-            "💰 Укажите надбавку за каждый год выпуска:",
-            state=state,
-            timeout=None,
-        )
-        if not rate_resp or not rate_resp.text:
-            await send_safe(message.chat.id, "Операция отменена.")
-            return
-        try:
-            price_rate = int(rate_resp.text.strip())
-        except ValueError:
-            await send_safe(message.chat.id, "❌ Введите число.")
-            return
-
-        step_resp = await ask_user_raw(
-            message.chat.id,
-            "💰 Шаг группировки по годам (1 = каждый год, 3 = по 3 года). По умолчанию 1:",
-            state=state,
-            timeout=None,
-        )
-        price_step = 1
-        if step_resp and step_resp.text:
-            try:
-                price_step = max(1, int(step_resp.text.strip()))
-            except ValueError:
-                price_step = 1
-
-        event_data["pricing_type"] = PricingType.FORMULA
-        event_data["price_formula_base"] = price_base
-        event_data["price_formula_rate"] = price_rate
-        event_data["price_formula_reference_year"] = event_date.year
-        event_data["price_formula_step"] = price_step
-    else:
-        event_data["pricing_type"] = PricingType.FREE
-
-    # Step 9: Free for types
-    free_choice = await ask_user_choice(
-        message.chat.id,
-        "🎓 Для каких типов участников бесплатно?",
-        choices={
-            "teachers_organizers": "Учителя + Организаторы",
-            "teachers": "Только учителя",
-            "nobody": "Никто (все платят)",
-        },
-        state=state,
-        timeout=None,
+    event_data["free_for_types"] = await _collect_free_for_types(
+        message.chat.id, state
     )
 
-    if free_choice == "teachers_organizers":
-        event_data["free_for_types"] = ["TEACHER", "ORGANIZER"]
-    elif free_choice == "teachers":
-        event_data["free_for_types"] = ["TEACHER"]
-    # else: empty list
-
-    # Step 10: Early bird discount
-    if pricing_choice == "formula":
-        eb_resp = await ask_user_raw(
-            message.chat.id,
-            "🐦 Скидка за раннюю регистрацию (в рублях, 0 = без скидки):",
-            state=state,
-            timeout=None,
-        )
-        early_bird_discount = 0
-        if eb_resp and eb_resp.text:
-            try:
-                early_bird_discount = max(0, int(eb_resp.text.strip()))
-            except ValueError:
-                early_bird_discount = 0
-
-        event_data["early_bird_discount"] = early_bird_discount
-        if early_bird_discount > 0:
-            deadline_resp = await ask_user_raw(
-                message.chat.id,
-                "🐦 Дедлайн ранней регистрации (ДД.ММ.ГГГГ):",
-                state=state,
-                timeout=None,
-            )
-            if deadline_resp and deadline_resp.text:
-                try:
-                    event_data["early_bird_deadline"] = datetime.strptime(
-                        deadline_resp.text.strip(), "%d.%m.%Y"
-                    )
-                except ValueError:
-                    await send_safe(
-                        message.chat.id,
-                        "⚠️ Неверный формат даты, скидка будет без дедлайна.",
-                    )
-                    event_data["early_bird_deadline"] = None
-            else:
-                event_data["early_bird_deadline"] = None
-        else:
-            event_data["early_bird_deadline"] = None
-    else:
-        event_data["early_bird_discount"] = 0
-        event_data["early_bird_deadline"] = None
-
-    # Step 11: Guest settings
-    guests_choice = await ask_user_choice(
-        message.chat.id,
-        "👥 Разрешить участникам приводить гостей (+1)?",
-        choices={
-            "yes": "Да",
-            "no": "Нет",
-        },
-        state=state,
-        timeout=None,
+    early_bird_data = await _collect_early_bird(
+        message.chat.id, state, pricing_choice
     )
+    event_data.update(early_bird_data)
 
-    if guests_choice == "yes":
-        event_data["guests_enabled"] = True
+    guest_data = await _collect_guest_settings(message.chat.id, state)
+    event_data.update(guest_data)
 
-        max_guests_resp = await ask_user_raw(
-            message.chat.id,
-            "Максимальное количество гостей на человека (по умолчанию 3):",
-            state=state,
-            timeout=None,
-        )
-        if max_guests_resp and max_guests_resp.text:
-            text = max_guests_resp.text.strip()
-            try:
-                event_data["max_guests_per_person"] = max(1, int(text))
-            except ValueError:
-                event_data["max_guests_per_person"] = 3
-        else:
-            event_data["max_guests_per_person"] = 3
-
-        min_price_resp = await ask_user_raw(
-            message.chat.id,
-            "Минимальная цена за гостя в рублях (0 = такая же, как у регистранта):",
-            state=state,
-            timeout=None,
-        )
-        if min_price_resp and min_price_resp.text:
-            text = min_price_resp.text.strip()
-            try:
-                event_data["guest_price_minimum"] = max(0, int(text))
-            except ValueError:
-                event_data["guest_price_minimum"] = 0
-        else:
-            event_data["guest_price_minimum"] = 0
-    else:
-        event_data["guests_enabled"] = False
-        event_data["max_guests_per_person"] = 3
-        event_data["guest_price_minimum"] = 0
-
-    # Step 11: Confirmation
     summary = _format_event_summary(event_data)
     confirm = await ask_user_confirmation(
         message.chat.id,
@@ -501,6 +558,431 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
 
 
 # ---------------------------------------------------------------------------
+# manage_events helpers
+# ---------------------------------------------------------------------------
+
+
+async def _handle_toggle_event(
+    chat_id: int,
+    state: FSMContext,
+    app: App,
+    event: dict,
+    event_id: str,
+    user_id: int,
+    username: str,
+) -> None:
+    new_enabled = not event.get("enabled", False)
+    await app.update_event(event_id, {"enabled": new_enabled})
+    status_text = "включена" if new_enabled else "выключена"
+    await send_safe(chat_id, f"Регистрация {status_text}.")
+    await app.save_event_log(
+        event_type="admin_event_action",
+        data={
+            "action": "toggle_registration",
+            "event_id": event_id,
+            "event_name": event.get("name"),
+            "new_enabled": new_enabled,
+        },
+        user_id=user_id,
+        username=username,
+    )
+
+
+async def _handle_archive_event(
+    chat_id: int,
+    state: FSMContext,
+    app: App,
+    event: dict,
+    event_id: str,
+    reg_count: int,
+    user_id: int,
+    username: str,
+) -> bool:
+    """Returns False if user cancelled, True otherwise."""
+    if reg_count > 0:
+        confirm = await ask_user_confirmation(
+            chat_id,
+            f"⚠️ У этой встречи {reg_count} регистраций. "
+            f"После архивации они не будут видны пользователям. Продолжить?",
+            state=state,
+        )
+        if not confirm:
+            return False
+
+    await app.update_event(
+        event_id,
+        {"status": EventStatus.ARCHIVED, "enabled": False},
+    )
+    await send_safe(chat_id, "Встреча архивирована.")
+    await app.save_event_log(
+        event_type="admin_event_action",
+        data={
+            "action": "archive_event",
+            "event_id": event_id,
+            "event_name": event.get("name"),
+        },
+        user_id=user_id,
+        username=username,
+    )
+    return True
+
+
+async def _handle_edit_field_name(
+    chat_id: int,
+    state: FSMContext,
+    app: App,
+    event: dict,
+    event_id: str,
+    user_id: int,
+    username: str,
+) -> None:
+    resp = await ask_user_raw(
+        chat_id,
+        f"Текущее название: {event.get('name')}\nВведите новое:",
+        state=state,
+        timeout=None,
+    )
+    if resp and resp.text:
+        old_name = event.get("name")
+        await app.update_event(event_id, {"name": resp.text.strip()})
+        await send_safe(chat_id, "✅ Название обновлено.")
+        await app.save_event_log(
+            event_type="admin_event_action",
+            data={
+                "action": "edit_event",
+                "event_id": event_id,
+                "field": "name",
+                "old": old_name,
+                "new": resp.text.strip(),
+            },
+            user_id=user_id,
+            username=username,
+        )
+
+
+async def _handle_edit_field_date(
+    chat_id: int, state: FSMContext, app: App, event: dict, event_id: str
+) -> None:
+    resp = await ask_user_raw(
+        chat_id,
+        f"Текущая дата: {event.get('date_display')}\n"
+        f"Введите новую дату (ДД.ММ.ГГГГ):",
+        state=state,
+        timeout=None,
+    )
+    if resp and resp.text:
+        try:
+            new_date = datetime.strptime(resp.text.strip(), "%d.%m.%Y")
+            old_date = event.get("date")
+            if old_date:
+                new_date = new_date.replace(
+                    hour=old_date.hour, minute=old_date.minute
+                )
+            await app.update_event(
+                event_id,
+                {
+                    "date": new_date,
+                    "date_display": _make_date_display(new_date),
+                },
+            )
+            await send_safe(chat_id, "✅ Дата обновлена.")
+        except ValueError:
+            await send_safe(
+                chat_id,
+                "❌ Неверный формат. Используйте ДД.ММ.ГГГГ",
+            )
+
+
+async def _handle_edit_field_time(
+    chat_id: int, state: FSMContext, app: App, event: dict, event_id: str
+) -> None:
+    resp = await ask_user_raw(
+        chat_id,
+        f"Текущее время: {event.get('time_display')}\nВведите новое:",
+        state=state,
+        timeout=None,
+    )
+    if resp and resp.text:
+        await app.update_event(event_id, {"time_display": resp.text.strip()})
+        await send_safe(chat_id, "✅ Время обновлено.")
+
+
+async def _handle_edit_field_venue(
+    chat_id: int, state: FSMContext, app: App, event: dict, event_id: str
+) -> None:
+    resp = await ask_user_raw(
+        chat_id,
+        f"Текущее место: {event.get('venue') or 'Не указано'}\nВведите новое:",
+        state=state,
+        timeout=None,
+    )
+    if resp and resp.text:
+        await app.update_event(event_id, {"venue": resp.text.strip()})
+        await send_safe(chat_id, "✅ Место обновлено.")
+
+
+async def _handle_edit_field_address(
+    chat_id: int, state: FSMContext, app: App, event: dict, event_id: str
+) -> None:
+    resp = await ask_user_raw(
+        chat_id,
+        f"Текущий адрес: {event.get('address') or 'Не указано'}\nВведите новый:",
+        state=state,
+        timeout=None,
+    )
+    if resp and resp.text:
+        await app.update_event(event_id, {"address": resp.text.strip()})
+        await send_safe(chat_id, "✅ Адрес обновлен.")
+
+
+async def _handle_edit_pricing_formula(
+    chat_id: int, state: FSMContext, app: App, event: dict, event_id: str
+) -> None:
+    current_base = event.get("price_formula_base", 0)
+    current_rate = event.get("price_formula_rate", 0)
+    current_ref = event.get("price_formula_reference_year", 2026)
+    current_step = event.get("price_formula_step", 1)
+
+    pricing_action = await ask_user_choice(
+        chat_id,
+        f"Текущие настройки формулы:\n"
+        f"• База: {current_base}₽\n"
+        f"• Надбавка: {current_rate}₽\n"
+        f"• Год отсчёта: {current_ref}\n"
+        f"• Шаг: {current_step}\n\n"
+        f"Что изменить?",
+        choices={
+            "base": "Базовая стоимость",
+            "rate": "Надбавка",
+            "step": "Шаг группировки",
+            "back": "Назад",
+        },
+        state=state,
+        timeout=None,
+    )
+
+    if pricing_action == "base":
+        resp = await ask_user_raw(
+            chat_id,
+            f"Текущая база: {current_base}₽\nВведите новую:",
+            state=state,
+            timeout=None,
+        )
+        if resp and resp.text:
+            try:
+                new_base = int(resp.text.strip())
+                await app.update_event(event_id, {"price_formula_base": new_base})
+                await send_safe(chat_id, f"✅ База: {new_base}₽.")
+            except ValueError:
+                await send_safe(chat_id, "❌ Введите число.")
+    elif pricing_action == "rate":
+        resp = await ask_user_raw(
+            chat_id,
+            f"Текущая надбавка: {current_rate}₽\nВведите новую:",
+            state=state,
+            timeout=None,
+        )
+        if resp and resp.text:
+            try:
+                new_rate = int(resp.text.strip())
+                await app.update_event(event_id, {"price_formula_rate": new_rate})
+                await send_safe(chat_id, f"✅ Надбавка: {new_rate}₽.")
+            except ValueError:
+                await send_safe(chat_id, "❌ Введите число.")
+    elif pricing_action == "step":
+        resp = await ask_user_raw(
+            chat_id,
+            f"Текущий шаг: {current_step}\nВведите новый (1 = каждый год, 3 = по 3 года):",
+            state=state,
+            timeout=None,
+        )
+        if resp and resp.text:
+            try:
+                new_step = max(1, int(resp.text.strip()))
+                await app.update_event(event_id, {"price_formula_step": new_step})
+                await send_safe(chat_id, f"✅ Шаг: {new_step}.")
+            except ValueError:
+                await send_safe(chat_id, "❌ Введите число.")
+
+
+async def _handle_edit_field_pricing(
+    chat_id: int, state: FSMContext, app: App, event: dict, event_id: str
+) -> None:
+    pricing_type = event.get("pricing_type", "free")
+    if pricing_type == PricingType.FORMULA:
+        await _handle_edit_pricing_formula(chat_id, state, app, event, event_id)
+    else:
+        await send_safe(
+            chat_id,
+            "Редактирование оплаты доступно только для формульного типа.",
+        )
+
+
+async def _handle_edit_early_bird(
+    chat_id: int, state: FSMContext, app: App, event: dict, event_id: str
+) -> None:
+    current_discount = event.get("early_bird_discount", 0)
+    current_deadline = event.get("early_bird_deadline")
+    deadline_str = (
+        current_deadline.strftime("%d.%m.%Y") if current_deadline else "не установлен"
+    )
+
+    eb_action = await ask_user_choice(
+        chat_id,
+        f"Текущие настройки ранней регистрации:\n"
+        f"• Скидка: {current_discount}₽\n"
+        f"• Дедлайн: {deadline_str}\n\n"
+        f"Что изменить?",
+        choices={
+            "discount": "Изменить скидку",
+            "deadline": "Изменить дедлайн",
+            "back": "Назад",
+        },
+        state=state,
+        timeout=None,
+    )
+
+    if eb_action == "discount":
+        resp = await ask_user_raw(
+            chat_id,
+            f"Текущая скидка: {current_discount}₽\nВведите новую (0 = без скидки):",
+            state=state,
+            timeout=None,
+        )
+        if resp and resp.text:
+            try:
+                new_discount = max(0, int(resp.text.strip()))
+                await app.update_event(event_id, {"early_bird_discount": new_discount})
+                await send_safe(chat_id, f"✅ Скидка: {new_discount}₽.")
+            except ValueError:
+                await send_safe(chat_id, "❌ Введите число.")
+    elif eb_action == "deadline":
+        resp = await ask_user_raw(
+            chat_id,
+            f"Текущий дедлайн: {deadline_str}\nВведите новый (ДД.ММ.ГГГГ):",
+            state=state,
+            timeout=None,
+        )
+        if resp and resp.text:
+            try:
+                new_deadline = datetime.strptime(resp.text.strip(), "%d.%m.%Y")
+                await app.update_event(event_id, {"early_bird_deadline": new_deadline})
+                await send_safe(chat_id, "✅ Дедлайн обновлён.")
+            except ValueError:
+                await send_safe(chat_id, "❌ Неверный формат. Используйте ДД.ММ.ГГГГ")
+
+
+async def _handle_edit_guests(
+    chat_id: int, state: FSMContext, app: App, event: dict, event_id: str
+) -> None:
+    current_enabled = event.get("guests_enabled", False)
+    current_max = event.get("max_guests_per_person", 3)
+    current_min = event.get("guest_price_minimum", 0)
+
+    guest_action = await ask_user_choice(
+        chat_id,
+        f"Текущие настройки гостей:\n"
+        f"• Разрешены: {'Да' if current_enabled else 'Нет'}\n"
+        f"• Макс. гостей: {current_max}\n"
+        f"• Мин. цена: {current_min}₽\n\n"
+        f"Что изменить?",
+        choices={
+            "toggle": f"{'Выключить' if current_enabled else 'Включить'} гостей",
+            "max": "Изменить макс. количество",
+            "min_price": "Изменить мин. цену",
+            "back": "Назад",
+        },
+        state=state,
+        timeout=None,
+    )
+
+    if guest_action == "toggle":
+        new_enabled = not current_enabled
+        await app.update_event(event_id, {"guests_enabled": new_enabled})
+        await send_safe(
+            chat_id,
+            f"✅ Гости {'включены' if new_enabled else 'выключены'}.",
+        )
+    elif guest_action == "max":
+        resp = await ask_user_raw(
+            chat_id,
+            f"Текущий максимум: {current_max}\nВведите новый:",
+            state=state,
+            timeout=None,
+        )
+        if resp and resp.text:
+            try:
+                new_max = max(1, int(resp.text.strip()))
+                await app.update_event(event_id, {"max_guests_per_person": new_max})
+                await send_safe(chat_id, f"✅ Максимум гостей: {new_max}.")
+            except ValueError:
+                await send_safe(chat_id, "❌ Введите число.")
+    elif guest_action == "min_price":
+        resp = await ask_user_raw(
+            chat_id,
+            f"Текущая мин. цена: {current_min}₽\nВведите новую (0 = как у регистранта):",
+            state=state,
+            timeout=None,
+        )
+        if resp and resp.text:
+            try:
+                new_min = max(0, int(resp.text.strip()))
+                await app.update_event(event_id, {"guest_price_minimum": new_min})
+                await send_safe(chat_id, f"✅ Мин. цена гостя: {new_min}₽.")
+            except ValueError:
+                await send_safe(chat_id, "❌ Введите число.")
+
+
+async def _handle_edit_event(
+    chat_id: int,
+    state: FSMContext,
+    app: App,
+    event: dict,
+    event_id: str,
+    user_id: int,
+    username: str,
+) -> None:
+    field = await ask_user_choice(
+        chat_id,
+        "Что изменить?",
+        choices={
+            "name": "Название",
+            "date": "Дата",
+            "time": "Время",
+            "venue": "Место",
+            "address": "Адрес",
+            "pricing": "Настройки оплаты",
+            "early_bird": "Ранняя регистрация",
+            "guests": "Настройки гостей",
+            "back": "Назад",
+        },
+        state=state,
+        timeout=None,
+    )
+
+    if field == "back":
+        return
+    elif field == "name":
+        await _handle_edit_field_name(
+            chat_id, state, app, event, event_id, user_id, username
+        )
+    elif field == "date":
+        await _handle_edit_field_date(chat_id, state, app, event, event_id)
+    elif field == "time":
+        await _handle_edit_field_time(chat_id, state, app, event, event_id)
+    elif field == "venue":
+        await _handle_edit_field_venue(chat_id, state, app, event, event_id)
+    elif field == "address":
+        await _handle_edit_field_address(chat_id, state, app, event, event_id)
+    elif field == "pricing":
+        await _handle_edit_field_pricing(chat_id, state, app, event, event_id)
+    elif field == "early_bird":
+        await _handle_edit_early_bird(chat_id, state, app, event, event_id)
+    elif field == "guests":
+        await _handle_edit_guests(chat_id, state, app, event, event_id)
+
+
+# ---------------------------------------------------------------------------
 # /manage_events
 # ---------------------------------------------------------------------------
 
@@ -515,7 +997,6 @@ async def manage_events_handler(message: Message, state: FSMContext, app: App):
         return
 
     while True:
-        # Build event list
         all_events = await app.get_all_events()
 
         active_events = [
@@ -527,7 +1008,6 @@ async def manage_events_handler(message: Message, state: FSMContext, app: App):
             e for e in all_events if e.get("status") in ("archived", "passed")
         ]
 
-        # Build choices
         choices = {}
         if active_events:
             for ev in active_events:
@@ -567,7 +1047,6 @@ async def manage_events_handler(message: Message, state: FSMContext, app: App):
             await send_safe(message.chat.id, archive_text)
             continue
 
-        # User selected a specific event
         if not selection:
             continue
         event = await app.get_event_by_id(selection)
@@ -595,373 +1074,37 @@ async def manage_events_handler(message: Message, state: FSMContext, app: App):
             continue
 
         if action == "toggle":
-            new_enabled = not event.get("enabled", False)
-            await app.update_event(selection, {"enabled": new_enabled})
-            status_text = "включена" if new_enabled else "выключена"
-            await send_safe(message.chat.id, f"Регистрация {status_text}.")
-            await app.save_event_log(
-                event_type="admin_event_action",
-                data={
-                    "action": "toggle_registration",
-                    "event_id": selection,
-                    "event_name": event.get("name"),
-                    "new_enabled": new_enabled,
-                },
-                user_id=message.from_user.id,
-                username=message.from_user.username,
+            await _handle_toggle_event(
+                message.chat.id,
+                state,
+                app,
+                event,
+                selection,
+                message.from_user.id,
+                message.from_user.username,
             )
             continue
 
         if action == "archive":
-            if reg_count > 0:
-                confirm = await ask_user_confirmation(
-                    message.chat.id,
-                    f"⚠️ У этой встречи {reg_count} регистраций. "
-                    f"После архивации они не будут видны пользователям. Продолжить?",
-                    state=state,
-                )
-                if not confirm:
-                    continue
-
-            await app.update_event(
+            await _handle_archive_event(
+                message.chat.id,
+                state,
+                app,
+                event,
                 selection,
-                {"status": EventStatus.ARCHIVED, "enabled": False},
-            )
-            await send_safe(message.chat.id, "Встреча архивирована.")
-            await app.save_event_log(
-                event_type="admin_event_action",
-                data={
-                    "action": "archive_event",
-                    "event_id": selection,
-                    "event_name": event.get("name"),
-                },
-                user_id=message.from_user.id,
-                username=message.from_user.username,
+                reg_count,
+                message.from_user.id,
+                message.from_user.username,
             )
             continue
 
         if action == "edit":
-            field = await ask_user_choice(
+            await _handle_edit_event(
                 message.chat.id,
-                "Что изменить?",
-                choices={
-                    "name": "Название",
-                    "date": "Дата",
-                    "time": "Время",
-                    "venue": "Место",
-                    "address": "Адрес",
-                    "pricing": "Настройки оплаты",
-                    "early_bird": "Ранняя регистрация",
-                    "guests": "Настройки гостей",
-                    "back": "Назад",
-                },
-                state=state,
-                timeout=None,
+                state,
+                app,
+                event,
+                selection,
+                message.from_user.id,
+                message.from_user.username,
             )
-
-            if field == "back":
-                continue
-
-            if field == "name":
-                resp = await ask_user_raw(
-                    message.chat.id,
-                    f"Текущее название: {event.get('name')}\nВведите новое:",
-                    state=state,
-                    timeout=None,
-                )
-                if resp and resp.text:
-                    old_name = event.get("name")
-                    await app.update_event(selection, {"name": resp.text.strip()})
-                    await send_safe(message.chat.id, "✅ Название обновлено.")
-                    await app.save_event_log(
-                        event_type="admin_event_action",
-                        data={
-                            "action": "edit_event",
-                            "event_id": selection,
-                            "field": "name",
-                            "old": old_name,
-                            "new": resp.text.strip(),
-                        },
-                        user_id=message.from_user.id,
-                        username=message.from_user.username,
-                    )
-
-            elif field == "date":
-                resp = await ask_user_raw(
-                    message.chat.id,
-                    f"Текущая дата: {event.get('date_display')}\n"
-                    f"Введите новую дату (ДД.ММ.ГГГГ):",
-                    state=state,
-                    timeout=None,
-                )
-                if resp and resp.text:
-                    try:
-                        new_date = datetime.strptime(resp.text.strip(), "%d.%m.%Y")
-                        # Preserve time from existing date
-                        old_date = event.get("date")
-                        if old_date:
-                            new_date = new_date.replace(
-                                hour=old_date.hour, minute=old_date.minute
-                            )
-                        await app.update_event(
-                            selection,
-                            {
-                                "date": new_date,
-                                "date_display": _make_date_display(new_date),
-                            },
-                        )
-                        await send_safe(message.chat.id, "✅ Дата обновлена.")
-                    except ValueError:
-                        await send_safe(
-                            message.chat.id,
-                            "❌ Неверный формат. Используйте ДД.ММ.ГГГГ",
-                        )
-
-            elif field == "time":
-                resp = await ask_user_raw(
-                    message.chat.id,
-                    f"Текущее время: {event.get('time_display')}\nВведите новое:",
-                    state=state,
-                    timeout=None,
-                )
-                if resp and resp.text:
-                    await app.update_event(
-                        selection, {"time_display": resp.text.strip()}
-                    )
-                    await send_safe(message.chat.id, "✅ Время обновлено.")
-
-            elif field == "venue":
-                resp = await ask_user_raw(
-                    message.chat.id,
-                    f"Текущее место: {event.get('venue') or 'Не указано'}\nВведите новое:",
-                    state=state,
-                    timeout=None,
-                )
-                if resp and resp.text:
-                    await app.update_event(selection, {"venue": resp.text.strip()})
-                    await send_safe(message.chat.id, "✅ Место обновлено.")
-
-            elif field == "address":
-                resp = await ask_user_raw(
-                    message.chat.id,
-                    f"Текущий адрес: {event.get('address') or 'Не указано'}\nВведите новый:",
-                    state=state,
-                    timeout=None,
-                )
-                if resp and resp.text:
-                    await app.update_event(selection, {"address": resp.text.strip()})
-                    await send_safe(message.chat.id, "✅ Адрес обновлен.")
-
-            elif field == "pricing":
-                pricing_type = event.get("pricing_type", "free")
-                if pricing_type == PricingType.FORMULA:
-                    current_base = event.get("price_formula_base", 0)
-                    current_rate = event.get("price_formula_rate", 0)
-                    current_ref = event.get("price_formula_reference_year", 2026)
-                    current_step = event.get("price_formula_step", 1)
-
-                    pricing_action = await ask_user_choice(
-                        message.chat.id,
-                        f"Текущие настройки формулы:\n"
-                        f"• База: {current_base}₽\n"
-                        f"• Надбавка: {current_rate}₽\n"
-                        f"• Год отсчёта: {current_ref}\n"
-                        f"• Шаг: {current_step}\n\n"
-                        f"Что изменить?",
-                        choices={
-                            "base": "Базовая стоимость",
-                            "rate": "Надбавка",
-                            "step": "Шаг группировки",
-                            "back": "Назад",
-                        },
-                        state=state,
-                        timeout=None,
-                    )
-
-                    if pricing_action == "base":
-                        resp = await ask_user_raw(
-                            message.chat.id,
-                            f"Текущая база: {current_base}₽\nВведите новую:",
-                            state=state,
-                            timeout=None,
-                        )
-                        if resp and resp.text:
-                            try:
-                                new_base = int(resp.text.strip())
-                                await app.update_event(
-                                    selection, {"price_formula_base": new_base}
-                                )
-                                await send_safe(
-                                    message.chat.id, f"✅ База: {new_base}₽."
-                                )
-                            except ValueError:
-                                await send_safe(message.chat.id, "❌ Введите число.")
-                    elif pricing_action == "rate":
-                        resp = await ask_user_raw(
-                            message.chat.id,
-                            f"Текущая надбавка: {current_rate}₽\nВведите новую:",
-                            state=state,
-                            timeout=None,
-                        )
-                        if resp and resp.text:
-                            try:
-                                new_rate = int(resp.text.strip())
-                                await app.update_event(
-                                    selection, {"price_formula_rate": new_rate}
-                                )
-                                await send_safe(
-                                    message.chat.id, f"✅ Надбавка: {new_rate}₽."
-                                )
-                            except ValueError:
-                                await send_safe(message.chat.id, "❌ Введите число.")
-                    elif pricing_action == "step":
-                        resp = await ask_user_raw(
-                            message.chat.id,
-                            f"Текущий шаг: {current_step}\nВведите новый (1 = каждый год, 3 = по 3 года):",
-                            state=state,
-                            timeout=None,
-                        )
-                        if resp and resp.text:
-                            try:
-                                new_step = max(1, int(resp.text.strip()))
-                                await app.update_event(
-                                    selection, {"price_formula_step": new_step}
-                                )
-                                await send_safe(message.chat.id, f"✅ Шаг: {new_step}.")
-                            except ValueError:
-                                await send_safe(message.chat.id, "❌ Введите число.")
-                else:
-                    await send_safe(
-                        message.chat.id,
-                        "Редактирование оплаты доступно только для формульного типа.",
-                    )
-
-            elif field == "early_bird":
-                current_discount = event.get("early_bird_discount", 0)
-                current_deadline = event.get("early_bird_deadline")
-                deadline_str = (
-                    current_deadline.strftime("%d.%m.%Y")
-                    if current_deadline
-                    else "не установлен"
-                )
-
-                eb_action = await ask_user_choice(
-                    message.chat.id,
-                    f"Текущие настройки ранней регистрации:\n"
-                    f"• Скидка: {current_discount}₽\n"
-                    f"• Дедлайн: {deadline_str}\n\n"
-                    f"Что изменить?",
-                    choices={
-                        "discount": "Изменить скидку",
-                        "deadline": "Изменить дедлайн",
-                        "back": "Назад",
-                    },
-                    state=state,
-                    timeout=None,
-                )
-
-                if eb_action == "discount":
-                    resp = await ask_user_raw(
-                        message.chat.id,
-                        f"Текущая скидка: {current_discount}₽\nВведите новую (0 = без скидки):",
-                        state=state,
-                        timeout=None,
-                    )
-                    if resp and resp.text:
-                        try:
-                            new_discount = max(0, int(resp.text.strip()))
-                            await app.update_event(
-                                selection, {"early_bird_discount": new_discount}
-                            )
-                            await send_safe(
-                                message.chat.id, f"✅ Скидка: {new_discount}₽."
-                            )
-                        except ValueError:
-                            await send_safe(message.chat.id, "❌ Введите число.")
-                elif eb_action == "deadline":
-                    resp = await ask_user_raw(
-                        message.chat.id,
-                        f"Текущий дедлайн: {deadline_str}\nВведите новый (ДД.ММ.ГГГГ):",
-                        state=state,
-                        timeout=None,
-                    )
-                    if resp and resp.text:
-                        try:
-                            new_deadline = datetime.strptime(
-                                resp.text.strip(), "%d.%m.%Y"
-                            )
-                            await app.update_event(
-                                selection, {"early_bird_deadline": new_deadline}
-                            )
-                            await send_safe(message.chat.id, "✅ Дедлайн обновлён.")
-                        except ValueError:
-                            await send_safe(
-                                message.chat.id,
-                                "❌ Неверный формат. Используйте ДД.ММ.ГГГГ",
-                            )
-
-            elif field == "guests":
-                current_enabled = event.get("guests_enabled", False)
-                current_max = event.get("max_guests_per_person", 3)
-                current_min = event.get("guest_price_minimum", 0)
-
-                guest_action = await ask_user_choice(
-                    message.chat.id,
-                    f"Текущие настройки гостей:\n"
-                    f"• Разрешены: {'Да' if current_enabled else 'Нет'}\n"
-                    f"• Макс. гостей: {current_max}\n"
-                    f"• Мин. цена: {current_min}₽\n\n"
-                    f"Что изменить?",
-                    choices={
-                        "toggle": f"{'Выключить' if current_enabled else 'Включить'} гостей",
-                        "max": "Изменить макс. количество",
-                        "min_price": "Изменить мин. цену",
-                        "back": "Назад",
-                    },
-                    state=state,
-                    timeout=None,
-                )
-
-                if guest_action == "toggle":
-                    new_enabled = not current_enabled
-                    await app.update_event(selection, {"guests_enabled": new_enabled})
-                    await send_safe(
-                        message.chat.id,
-                        f"✅ Гости {'включены' if new_enabled else 'выключены'}.",
-                    )
-                elif guest_action == "max":
-                    resp = await ask_user_raw(
-                        message.chat.id,
-                        f"Текущий максимум: {current_max}\nВведите новый:",
-                        state=state,
-                        timeout=None,
-                    )
-                    if resp and resp.text:
-                        try:
-                            new_max = max(1, int(resp.text.strip()))
-                            await app.update_event(
-                                selection, {"max_guests_per_person": new_max}
-                            )
-                            await send_safe(
-                                message.chat.id, f"✅ Максимум гостей: {new_max}."
-                            )
-                        except ValueError:
-                            await send_safe(message.chat.id, "❌ Введите число.")
-                elif guest_action == "min_price":
-                    resp = await ask_user_raw(
-                        message.chat.id,
-                        f"Текущая мин. цена: {current_min}₽\nВведите новую (0 = как у регистранта):",
-                        state=state,
-                        timeout=None,
-                    )
-                    if resp and resp.text:
-                        try:
-                            new_min = max(0, int(resp.text.strip()))
-                            await app.update_event(
-                                selection, {"guest_price_minimum": new_min}
-                            )
-                            await send_safe(
-                                message.chat.id, f"✅ Мин. цена гостя: {new_min}₽."
-                            )
-                        except ValueError:
-                            await send_safe(message.chat.id, "❌ Введите число.")
