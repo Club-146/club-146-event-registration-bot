@@ -167,9 +167,8 @@ class App:
             logger.info(
                 f"Database fix applied to {fix_results['total_fixed']} records:"
             )
-            logger.info(f"- SPb: {fix_results['spb_fixed']}")
-            logger.info(f"- Belgrade: {fix_results['belgrade_fixed']}")
-            logger.info(f"- Teachers: {fix_results['teachers_fixed']}")
+            logger.info(f"- Free events: {fix_results['free_events_fixed']}")
+            logger.info(f"- Free types: {fix_results['free_types_fixed']}")
 
     @property
     def collection(self):
