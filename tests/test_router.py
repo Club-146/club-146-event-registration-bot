@@ -152,3 +152,312 @@ async def test_cancel_registration_handler_no_registrations(
     mock_send_safe.assert_called_once()
     args = mock_send_safe.call_args[0]
     assert "нет активных регистраций" in args[1].lower()
+
+
+# ---- Tests for _payment_status_emoji ----
+
+
+def test_payment_status_emoji_confirmed():
+    from src.router import _payment_status_emoji
+
+    assert _payment_status_emoji("confirmed") == "✅"
+
+
+def test_payment_status_emoji_declined():
+    from src.router import _payment_status_emoji
+
+    assert _payment_status_emoji("declined") == "❌"
+
+
+def test_payment_status_emoji_pending():
+    from src.router import _payment_status_emoji
+
+    assert _payment_status_emoji("pending") == "⏳"
+
+
+def test_payment_status_emoji_unknown():
+    from src.router import _payment_status_emoji
+
+    assert _payment_status_emoji("не оплачено") == "⏳"
+    assert _payment_status_emoji("") == "⏳"
+
+
+# ---- Tests for _format_guest_summary ----
+
+
+def test_format_guest_summary_single_guest_same_price():
+    from src.router import _format_guest_summary
+
+    guests = [{"name": "Алиса", "price": 500}]
+    result = _format_guest_summary(guests)
+    assert "Алиса" in result
+    assert "500" in result
+    assert "⏳" not in result
+
+
+def test_format_guest_summary_with_discount():
+    from src.router import _format_guest_summary
+
+    guests = [{"name": "Боб", "price": 600, "price_discounted": 400}]
+    result = _format_guest_summary(guests)
+    assert "600" in result
+    assert "400" in result
+    assert "ранней" in result
+
+
+def test_format_guest_summary_multiple_guests_no_discount():
+    from src.router import _format_guest_summary
+
+    guests = [
+        {"name": "Гость 1", "price": 500},
+        {"name": "Гость 2", "price": 500},
+    ]
+    result = _format_guest_summary(guests)
+    assert "Гость 1" in result
+    assert "Гость 2" in result
+    assert "1000" in result
+    # No early bird line when prices are equal
+    assert "ранней" not in result
+
+
+# ---- Tests for get_event_date_display ----
+
+
+def test_get_event_date_display_with_event():
+    from src.router import get_event_date_display
+
+    event = {"date_display": "21 Марта, Сб"}
+    assert get_event_date_display(event) == "21 Марта, Сб"
+
+
+def test_get_event_date_display_no_event():
+    from src.router import get_event_date_display
+
+    assert get_event_date_display(None) == "дата неизвестна"
+
+
+def test_get_event_date_display_missing_field():
+    from src.router import get_event_date_display
+
+    assert get_event_date_display({}) == "дата неизвестна"
+
+
+# ---- Tests for get_event_city ----
+
+
+def test_get_event_city_with_event():
+    from src.router import get_event_city
+
+    event = {"city": "Пермь"}
+    assert get_event_city(event) == "Пермь"
+
+
+def test_get_event_city_no_event():
+    from src.router import get_event_city
+
+    assert get_event_city(None) == ""
+
+
+# ---- Tests for is_event_free ----
+
+
+def test_is_event_free_no_event():
+    from src.router import is_event_free
+
+    assert is_event_free(None) is False
+
+
+def test_is_event_free_pricing_free():
+    from src.router import is_event_free
+
+    event = {"pricing_type": "free"}
+    assert is_event_free(event) is True
+
+
+def test_is_event_free_teacher_in_free_types():
+    from src.router import is_event_free
+    from src.app import GraduateType
+
+    event = {"free_for_types": [GraduateType.TEACHER.value], "pricing_type": "formula"}
+    assert is_event_free(event, GraduateType.TEACHER.value) is True
+
+
+def test_is_event_free_graduate_not_in_free_types():
+    from src.router import is_event_free
+    from src.app import GraduateType
+
+    event = {"free_for_types": ["TEACHER"], "pricing_type": "formula"}
+    assert is_event_free(event, GraduateType.GRADUATE.value) is False
+
+
+def test_is_event_free_no_free_types():
+    from src.router import is_event_free
+    from src.app import GraduateType
+
+    event = {"pricing_type": "formula"}
+    assert is_event_free(event, GraduateType.GRADUATE.value) is False
+
+
+# ---- Tests for _format_graduate_type_line ----
+
+
+def test_format_graduate_type_line_teacher():
+    from src.router import _format_graduate_type_line
+    from src.app import GraduateType
+
+    result = _format_graduate_type_line(GraduateType.TEACHER.value)
+    assert "Учитель" in result
+
+
+def test_format_graduate_type_line_non_graduate():
+    from src.router import _format_graduate_type_line
+    from src.app import GraduateType
+
+    result = _format_graduate_type_line(GraduateType.NON_GRADUATE.value)
+    assert "выпускник" in result.lower() or "Не выпускник" in result
+
+
+def test_format_graduate_type_line_organizer():
+    from src.router import _format_graduate_type_line
+    from src.app import GraduateType
+
+    result = _format_graduate_type_line(GraduateType.ORGANIZER.value)
+    assert "Организатор" in result
+
+
+def test_format_graduate_type_line_graduate_returns_empty():
+    from src.router import _format_graduate_type_line
+    from src.app import GraduateType
+
+    result = _format_graduate_type_line(GraduateType.GRADUATE.value)
+    assert result == ""
+
+
+# ---- Tests for _format_payment_status_line ----
+
+
+def test_format_payment_status_line_free_teacher():
+    from src.router import _format_payment_status_line
+    from src.app import GraduateType
+
+    event = {"pricing_type": "free", "free_for_types": []}
+    reg = {}
+    result = _format_payment_status_line(reg, event, GraduateType.TEACHER.value)
+    assert "учитель" in result.lower() or "бесплатно" in result.lower()
+
+
+def test_format_payment_status_line_free_organizer():
+    from src.router import _format_payment_status_line
+    from src.app import GraduateType
+
+    event = {"pricing_type": "free"}
+    reg = {}
+    result = _format_payment_status_line(reg, event, GraduateType.ORGANIZER.value)
+    assert "организатор" in result.lower()
+
+
+def test_format_payment_status_line_teacher_in_free_types():
+    from src.router import _format_payment_status_line
+    from src.app import GraduateType
+
+    event = {"pricing_type": "formula", "free_for_types": [GraduateType.TEACHER.value]}
+    reg = {}
+    result = _format_payment_status_line(reg, event, GraduateType.TEACHER.value)
+    assert "учитель" in result.lower() or "бесплатно" in result.lower()
+
+
+def test_format_payment_status_line_confirmed():
+    from src.router import _format_payment_status_line
+    from src.app import GraduateType
+
+    event = {"pricing_type": "formula", "free_for_types": []}
+    reg = {"payment_status": "confirmed", "payment_amount": 1500}
+    result = _format_payment_status_line(reg, event, GraduateType.GRADUATE.value)
+    assert "✅" in result
+    assert "1500" in result
+
+
+def test_format_payment_status_line_pending_with_expected_amount():
+    from src.router import _format_payment_status_line
+    from src.app import GraduateType
+
+    event = {"pricing_type": "formula", "free_for_types": []}
+    reg = {"payment_status": "pending", "discounted_payment_amount": 1800}
+    result = _format_payment_status_line(reg, event, GraduateType.GRADUATE.value)
+    assert "⏳" in result
+    assert "1800" in result
+
+
+def test_format_payment_status_line_not_paid():
+    from src.router import _format_payment_status_line
+    from src.app import GraduateType
+
+    event = {"pricing_type": "formula", "free_for_types": []}
+    reg = {}
+    result = _format_payment_status_line(reg, event, GraduateType.GRADUATE.value)
+    assert "⏳" in result
+
+
+# ---- Tests for _format_registration_status_text ----
+
+
+def test_format_registration_status_text_single():
+    from src.router import _format_registration_status_text
+    from src.app import GraduateType
+
+    mock_app = MagicMock()
+    mock_app.is_event_passed = MagicMock(return_value=False)
+
+    registrations = [
+        {
+            "target_city": "Москва",
+            "full_name": "Тест Тестов",
+            "graduate_type": GraduateType.GRADUATE.value,
+            "graduation_year": 2010,
+            "class_letter": "А",
+            "payment_status": "confirmed",
+            "payment_amount": 2000,
+        }
+    ]
+    events = [{"date_display": "21 Марта", "city": "Москва", "pricing_type": "formula", "free_for_types": []}]
+
+    result = _format_registration_status_text(registrations, events, mock_app)
+    assert "Москва" in result
+    assert "Тест Тестов" in result
+    assert "2010" in result
+    assert "✅" in result
+
+
+def test_format_registration_status_text_multiple():
+    from src.router import _format_registration_status_text
+    from src.app import GraduateType
+
+    mock_app = MagicMock()
+    mock_app.is_event_passed = MagicMock(return_value=False)
+
+    registrations = [
+        {
+            "target_city": "Москва",
+            "full_name": "Иван",
+            "graduate_type": GraduateType.GRADUATE.value,
+            "graduation_year": 2010,
+            "class_letter": "А",
+        },
+        {
+            "target_city": "Пермь",
+            "full_name": "Мария",
+            "graduate_type": GraduateType.TEACHER.value,
+            "graduation_year": 1999,
+            "class_letter": "Б",
+        },
+    ]
+    events = [
+        {"date_display": "21 Марта", "pricing_type": "formula", "free_for_types": []},
+        {"date_display": "15 Апреля", "pricing_type": "free", "free_for_types": []},
+    ]
+
+    result = _format_registration_status_text(registrations, events, mock_app)
+    assert "Москва" in result
+    assert "Пермь" in result
+    assert "Иван" in result
+    assert "Мария" in result

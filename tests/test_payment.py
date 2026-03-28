@@ -229,3 +229,486 @@ async def test_pay_handler_with_registration(
 #     # Similar issues to confirm_payment_callback - needs rework
 #     # Commenting out for now to allow tests to pass
 #     pass
+
+
+# ---- Tests for parse_payment_callback_data ----
+
+
+def test_parse_payment_callback_new_format_with_amount():
+    from src.routers.payment import parse_payment_callback_data
+
+    cb = "confirm_payment_12345_aabbccddeeff00112233aabb_2000"
+    user_id, event_id, amount = parse_payment_callback_data(cb)
+    assert user_id == 12345
+    assert event_id == "aabbccddeeff00112233aabb"
+    assert amount == "2000"
+
+
+def test_parse_payment_callback_new_format_no_amount():
+    from src.routers.payment import parse_payment_callback_data
+
+    cb = "confirm_payment_99999_aabbccddeeff00112233aabb"
+    user_id, event_id, amount = parse_payment_callback_data(cb)
+    assert user_id == 99999
+    assert event_id == "aabbccddeeff00112233aabb"
+    assert amount is None
+
+
+def test_parse_payment_callback_decline_prefix():
+    from src.routers.payment import parse_payment_callback_data
+
+    cb = "decline_payment_42_aabbccddeeff00112233aabb"
+    user_id, event_id, amount = parse_payment_callback_data(cb)
+    assert user_id == 42
+    assert event_id == "aabbccddeeff00112233aabb"
+    assert amount is None
+
+
+def test_parse_payment_callback_old_format_simple_city():
+    from src.routers.payment import parse_payment_callback_data
+
+    cb = "confirm_payment_12345_MOSCOW_1500"
+    user_id, city_code, amount = parse_payment_callback_data(cb)
+    assert user_id == 12345
+    assert city_code == "MOSCOW"
+    assert amount == "1500"
+
+
+def test_parse_payment_callback_old_format_compound_city():
+    from src.routers.payment import parse_payment_callback_data
+
+    cb = "confirm_payment_12345_PERM_SUMMER_1500"
+    user_id, city_code, amount = parse_payment_callback_data(cb)
+    assert user_id == 12345
+    assert city_code == "PERM_SUMMER"
+    assert amount == "1500"
+
+
+def test_parse_payment_callback_invalid_prefix():
+    from src.routers.payment import parse_payment_callback_data
+
+    with pytest.raises(ValueError, match="Invalid callback data format"):
+        parse_payment_callback_data("some_other_12345_abc")
+
+
+def test_parse_payment_callback_too_short():
+    from src.routers.payment import parse_payment_callback_data
+
+    with pytest.raises(ValueError, match="Invalid callback data structure"):
+        parse_payment_callback_data("confirm_payment_12345")
+
+
+def test_parse_payment_callback_custom_amount():
+    from src.routers.payment import parse_payment_callback_data
+
+    cb = "confirm_payment_12345_aabbccddeeff00112233aabb_custom"
+    user_id, event_id, amount = parse_payment_callback_data(cb)
+    assert user_id == 12345
+    assert event_id == "aabbccddeeff00112233aabb"
+    assert amount == "custom"
+
+
+# ---- Tests for _build_payment_formula ----
+
+
+def test_build_payment_formula_no_event():
+    from src.routers.payment import _build_payment_formula
+
+    assert _build_payment_formula(None) == "за свой счет"
+
+
+def test_build_payment_formula_free():
+    from src.routers.payment import _build_payment_formula
+
+    event = {"pricing_type": "free"}
+    assert _build_payment_formula(event) == "за свой счет"
+
+
+def test_build_payment_formula_fixed_by_year():
+    from src.routers.payment import _build_payment_formula
+
+    event = {"pricing_type": "fixed_by_year"}
+    assert _build_payment_formula(event) == "фиксированная сумма по году выпуска"
+
+
+def test_build_payment_formula_formula_no_step():
+    from src.routers.payment import _build_payment_formula
+
+    event = {
+        "pricing_type": "formula",
+        "price_formula_base": 500,
+        "price_formula_rate": 100,
+        "price_formula_reference_year": 2026,
+        "price_formula_step": 1,
+    }
+    result = _build_payment_formula(event)
+    assert "500" in result
+    assert "100" in result
+    assert "2026" in result
+    assert "÷" not in result
+
+
+def test_build_payment_formula_formula_with_step():
+    from src.routers.payment import _build_payment_formula
+
+    event = {
+        "pricing_type": "formula",
+        "price_formula_base": 500,
+        "price_formula_rate": 100,
+        "price_formula_reference_year": 2026,
+        "price_formula_step": 2,
+    }
+    result = _build_payment_formula(event)
+    assert "÷" in result
+    assert "2" in result
+
+
+def test_build_payment_formula_unknown_type():
+    from src.routers.payment import _build_payment_formula
+
+    event = {"pricing_type": "unknown"}
+    assert _build_payment_formula(event) == "за свой счет"
+
+
+# ---- Tests for _check_early_bird ----
+
+
+def test_check_early_bird_no_event():
+    from src.routers.payment import _check_early_bird
+
+    is_early, deadline, discount = _check_early_bird(None)
+    assert is_early is False
+    assert deadline is None
+    assert discount == 0
+
+
+def test_check_early_bird_no_deadline():
+    from src.routers.payment import _check_early_bird
+
+    event = {"early_bird_discount": 200}
+    is_early, deadline, discount = _check_early_bird(event)
+    assert is_early is False
+
+
+def test_check_early_bird_active(monkeypatch):
+    from src.routers.payment import _check_early_bird
+    from datetime import datetime
+
+    future_date = datetime(2099, 12, 31)
+    event = {"early_bird_deadline": future_date, "early_bird_discount": 300}
+    is_early, deadline, discount = _check_early_bird(event)
+    assert is_early is True
+    assert deadline == future_date
+    assert discount == 300
+
+
+def test_check_early_bird_expired():
+    from src.routers.payment import _check_early_bird
+    from datetime import datetime
+
+    past_date = datetime(2000, 1, 1)
+    event = {"early_bird_deadline": past_date, "early_bird_discount": 300}
+    is_early, deadline, discount = _check_early_bird(event)
+    assert is_early is False
+
+
+def test_check_early_bird_zero_discount():
+    from src.routers.payment import _check_early_bird
+    from datetime import datetime
+
+    future_date = datetime(2099, 12, 31)
+    event = {"early_bird_deadline": future_date, "early_bird_discount": 0}
+    is_early, deadline, discount = _check_early_bird(event)
+    assert is_early is False
+
+
+# ---- Tests for _calc_guest_totals ----
+
+
+def test_calc_guest_totals_no_guests():
+    from src.routers.payment import _calc_guest_totals
+
+    total_reg, total_disc = _calc_guest_totals([], 2000, 1800)
+    assert total_reg == 2000
+    assert total_disc == 1800
+
+
+def test_calc_guest_totals_with_guests():
+    from src.routers.payment import _calc_guest_totals
+
+    guests = [
+        {"price": 500, "price_discounted": 400},
+        {"price": 600, "price_discounted": 500},
+    ]
+    total_reg, total_disc = _calc_guest_totals(guests, 2000, 1800)
+    assert total_reg == 2000 + 500 + 600
+    assert total_disc == 1800 + 400 + 500
+
+
+def test_calc_guest_totals_no_price_discounted():
+    from src.routers.payment import _calc_guest_totals
+
+    guests = [{"price": 500}]
+    total_reg, total_disc = _calc_guest_totals(guests, 2000, 1800)
+    assert total_reg == 2500
+    assert total_disc == 2300
+
+
+# ---- Tests for _get_city ----
+
+
+def test_get_city_from_event():
+    from src.routers.payment import _get_city
+
+    event = {"city": "Москва"}
+    assert _get_city(event, None) == "Москва"
+
+
+def test_get_city_from_registration_data():
+    from src.routers.payment import _get_city
+
+    reg = {"target_city": "Пермь"}
+    assert _get_city(None, reg) == "Пермь"
+
+
+def test_get_city_both_none():
+    from src.routers.payment import _get_city
+
+    assert _get_city(None, None) == ""
+
+
+# ---- Tests for _get_guests ----
+
+
+def test_get_guests_from_param():
+    from src.routers.payment import _get_guests
+
+    guests = [{"name": "Test", "price": 500}]
+    assert _get_guests(None, guests) == guests
+
+
+def test_get_guests_from_registration():
+    from src.routers.payment import _get_guests
+
+    reg = {"guests": [{"name": "Alice", "price": 500}]}
+    result = _get_guests(reg, None)
+    assert len(result) == 1
+    assert result[0]["name"] == "Alice"
+
+
+def test_get_guests_empty():
+    from src.routers.payment import _get_guests
+
+    assert _get_guests(None, None) == []
+    assert _get_guests({}, None) == []
+
+
+# ---- Tests for _build_user_info_text ----
+
+
+def test_build_user_info_text_no_guests():
+    from src.routers.payment import _build_user_info_text
+    from src.app import GraduateType
+
+    result = _build_user_info_text(
+        user_id=123,
+        username="alice",
+        city="Москва",
+        guests=[],
+        needs_to_pay="2000 руб",
+        total_regular_with_guests=2000,
+        user_registration=None,
+        graduate_type=GraduateType.GRADUATE.value,
+    )
+    assert "alice" in result
+    assert "123" in result
+    assert "Москва" in result
+    assert "2000 руб" in result
+
+
+def test_build_user_info_text_with_guests():
+    from src.routers.payment import _build_user_info_text
+    from src.app import GraduateType
+
+    guests = [{"name": "Боб", "price": 500}]
+    result = _build_user_info_text(
+        user_id=123,
+        username="alice",
+        city="Пермь",
+        guests=guests,
+        needs_to_pay="1800 руб",
+        total_regular_with_guests=2300,
+        user_registration=None,
+        graduate_type=GraduateType.GRADUATE.value,
+    )
+    assert "Боб" in result
+    assert "500" in result
+    assert "2300" in result
+
+
+def test_build_user_info_text_teacher():
+    from src.routers.payment import _build_user_info_text
+    from src.app import GraduateType
+
+    reg = {
+        "full_name": "Иван Иванов",
+        "graduate_type": GraduateType.TEACHER.value,
+    }
+    result = _build_user_info_text(
+        user_id=1,
+        username="ivan",
+        city="Москва",
+        guests=[],
+        needs_to_pay="0",
+        total_regular_with_guests=0,
+        user_registration=reg,
+        graduate_type=GraduateType.TEACHER.value,
+    )
+    assert "Учитель" in result
+    assert "Иван Иванов" in result
+
+
+def test_build_user_info_text_with_graduation_year():
+    from src.routers.payment import _build_user_info_text
+    from src.app import GraduateType
+
+    reg = {
+        "full_name": "Петр Петров",
+        "graduate_type": GraduateType.GRADUATE.value,
+        "graduation_year": 2010,
+        "class_letter": "Б",
+    }
+    result = _build_user_info_text(
+        user_id=2,
+        username="petr",
+        city="СПб",
+        guests=[],
+        needs_to_pay="1500 руб",
+        total_regular_with_guests=1500,
+        user_registration=reg,
+        graduate_type=GraduateType.GRADUATE.value,
+    )
+    assert "2010" in result
+    assert "Б" in result
+
+
+# ---- Tests for _build_validation_buttons ----
+
+
+def test_build_validation_buttons_valid_payment():
+    from src.routers.payment import _build_validation_buttons
+    from src.routers.admin import PaymentInfo
+
+    payment_info = PaymentInfo(amount=1500, is_valid=True)
+    buttons = _build_validation_buttons(
+        user_id=123,
+        event_id="aabbccddeeff00112233aabb",
+        payment_info=payment_info,
+        discount=200,
+        discounted_amount=1800,
+        regular_amount=2000,
+        formula_amount=2000,
+    )
+    # Should have "confirm recognized amount", "confirm other amount", "decline"
+    assert len(buttons) == 3
+    # Check recognized amount button
+    texts = [btn[0].text for btn in buttons]
+    assert any("1500" in t for t in texts)
+    # Check decline button
+    assert any("Отклонить" in t for t in texts)
+    # Check callback data contains event_id
+    callbacks = [btn[0].callback_data for btn in buttons]
+    assert any("aabbccddeeff00112233aabb" in cb for cb in callbacks)
+
+
+def test_build_validation_buttons_invalid_with_discount():
+    from src.routers.payment import _build_validation_buttons
+    from src.routers.admin import PaymentInfo
+
+    payment_info = PaymentInfo(amount=None, is_valid=False)
+    buttons = _build_validation_buttons(
+        user_id=99,
+        event_id="aabbccddeeff00112233aabb",
+        payment_info=payment_info,
+        discount=200,
+        discounted_amount=1800,
+        regular_amount=2000,
+        formula_amount=2000,
+    )
+    texts = [btn[0].text for btn in buttons]
+    # Discounted amount button should appear
+    assert any("1800" in t for t in texts)
+    assert any("2000" in t for t in texts)
+    assert any("Отклонить" in t for t in texts)
+
+
+def test_build_validation_buttons_formula_higher():
+    from src.routers.payment import _build_validation_buttons
+    from src.routers.admin import PaymentInfo
+
+    payment_info = PaymentInfo(amount=None, is_valid=False)
+    buttons = _build_validation_buttons(
+        user_id=5,
+        event_id="aabbccddeeff00112233aabb",
+        payment_info=payment_info,
+        discount=0,
+        discounted_amount=2000,
+        regular_amount=2000,
+        formula_amount=3000,
+    )
+    texts = [btn[0].text for btn in buttons]
+    assert any("3000" in t for t in texts)
+
+
+def test_build_validation_buttons_decline_callback_format():
+    from src.routers.payment import _build_validation_buttons
+    from src.routers.admin import PaymentInfo
+
+    payment_info = PaymentInfo(amount=None, is_valid=False)
+    buttons = _build_validation_buttons(
+        user_id=77,
+        event_id="aabbccddeeff00112233aabb",
+        payment_info=payment_info,
+        discount=0,
+        discounted_amount=1000,
+        regular_amount=1000,
+        formula_amount=1000,
+    )
+    # Last button should be decline
+    last_btn = buttons[-1][0]
+    assert last_btn.callback_data.startswith("decline_payment_77_")
+
+
+# ---- Tests for _get_graduate_type_info ----
+
+
+def test_get_graduate_type_info_teacher():
+    from src.routers.payment import _get_graduate_type_info
+    from src.app import GraduateType
+
+    reg = {"graduate_type": GraduateType.TEACHER.value}
+    result = _get_graduate_type_info(reg)
+    assert "Учитель" in result
+
+
+def test_get_graduate_type_info_non_graduate():
+    from src.routers.payment import _get_graduate_type_info
+    from src.app import GraduateType
+
+    reg = {"graduate_type": GraduateType.NON_GRADUATE.value}
+    result = _get_graduate_type_info(reg)
+    assert "Друг школы" in result or "не выпускник" in result.lower()
+
+
+def test_get_graduate_type_info_graduate():
+    from src.routers.payment import _get_graduate_type_info
+    from src.app import GraduateType
+
+    reg = {
+        "graduate_type": GraduateType.GRADUATE.value,
+        "graduation_year": 2005,
+        "class_letter": "В",
+    }
+    result = _get_graduate_type_info(reg)
+    assert "2005" in result
+    assert "В" in result
