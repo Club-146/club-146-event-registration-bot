@@ -40,45 +40,79 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
         show_payment_stats,
     )
 
-    # Show admin options
     response = await ask_user_choice(
         message.chat.id,
         "Вы администратор бота. Что вы хотите сделать?",
         choices={
             "register": "Протестировать бота (обычный сценарий)",
-            # "send_feedback_request": "Отправить запрос на обратную связь",
-            "manage_events": "Управление встречами",
-            "view_stats": "Посмотреть статистику (подробно)",
-            "view_simple_stats": "Посмотреть статистику (кратко)",
-            "other": "Другие действия",
-            "register_payment": "Отметить оплату",
-            "notify_users": "Рассылка пользователям",
-            "announce_season": "Анонс нового сезона встреч",
+            "management": "Управление",
+            "communication": "Коммуникации",
+            "stats": "Статистика и аналитика",
         },
         state=state,
         timeout=None,
     )
 
-    if response == "other":
+    # -- Management submenu --
+    if response == "management":
         response = await ask_user_choice(
             message.chat.id,
-            "Другие команды:",
+            "Управление:",
             choices={
-                "view_year_stats": "Посмотреть статистику по годам выпуска",
-                "five_year_stats": "График по пятилеткам выпуска",
-                "payment_stats": "Круговая диаграмма оплат",
-                "test_user_selection": "Тест выборки пользователей",
-                # old
+                "manage_events": "Управление встречами",
+                "register_payment": "Отметить оплату",
                 "export": "Экспортировать данные",
-                # too late
-                # "notify_early_payment": "Уведомить о раннем платеже",
             },
             state=state,
             timeout=None,
         )
 
-    if response == "export":
+    # -- Communication submenu --
+    if response == "communication":
+        response = await ask_user_choice(
+            message.chat.id,
+            "Коммуникации:",
+            choices={
+                "notify_users": "Рассылка пользователям",
+                "announce_season": "Анонс нового сезона встреч",
+            },
+            state=state,
+            timeout=None,
+        )
+
+    # -- Stats submenu --
+    if response == "stats":
+        response = await ask_user_choice(
+            message.chat.id,
+            "Статистика и аналитика:",
+            choices={
+                "view_stats": "Статистика (подробно)",
+                "view_simple_stats": "Статистика (кратко)",
+                "view_year_stats": "По годам выпуска",
+                "five_year_stats": "По пятилеткам выпуска",
+                "payment_stats": "Диаграмма оплат",
+            },
+            state=state,
+            timeout=None,
+        )
+
+    # -- Dispatch --
+    if response == "manage_events":
+        from src.routers.events import manage_events_handler
+
+        await manage_events_handler(message, state, app=app)
+    elif response == "register_payment":
+        await admin_register_payment(message, state, app)
+    elif response == "export":
         await export_handler(message, state, app=app)
+    elif response == "notify_users":
+        from src.routers.crm import notify_users_handler
+
+        await notify_users_handler(message, state, app=app)
+    elif response == "announce_season":
+        from src.routers.crm import announce_new_season_handler
+
+        await announce_new_season_handler(message, state, app=app)
     elif response == "view_stats":
         await show_stats(message, app=app)
     elif response == "view_simple_stats":
@@ -89,28 +123,6 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
         await show_five_year_stats(message, app=app)
     elif response == "payment_stats":
         await show_payment_stats(message, app=app)
-    elif response == "test_user_selection":
-        from src.routers.crm import test_user_selection_handler
-
-        await test_user_selection_handler(message, state, app=app)
-    elif response == "manage_events":
-        from src.routers.events import manage_events_handler
-
-        await manage_events_handler(message, state, app=app)
-    # elif response == "send_feedback_request":
-    #     from src.routers.crm import send_feedback_request_handler
-
-    #     await send_feedback_request_handler(message, state)
-    elif response == "register_payment":
-        await admin_register_payment(message, state, app)
-    elif response == "notify_users":
-        from src.routers.crm import notify_users_handler
-
-        await notify_users_handler(message, state, app=app)
-    elif response == "announce_season":
-        from src.routers.crm import announce_new_season_handler
-
-        await announce_new_season_handler(message, state, app=app)
     # For "register", continue with normal flow
     return response
 
