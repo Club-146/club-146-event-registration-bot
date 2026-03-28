@@ -103,6 +103,7 @@ class FeedbackData(BaseModel):
     user_id: int
     username: Optional[str] = None
     full_name: Optional[str] = None
+    event_id: Optional[str] = None
     city: Optional[str] = None
     attended: Optional[bool] = None
     recommendation_level: Optional[str] = None
@@ -649,24 +650,24 @@ class App:
                 "Неверный формат. Пожалуйста, введите год выпуска и букву класса (например, '2003 Б').",
             )
 
-    def export_registered_users_to_google_sheets(self):
-        return self.sheet_exporter.export_registered_users()
+    def export_registered_users_to_google_sheets(self, event_id: Optional[str] = None):
+        return self.sheet_exporter.export_registered_users(event_id=event_id)
 
-    async def export_to_csv(self):
+    async def export_to_csv(self, event_id: Optional[str] = None):
         """Export registered users to CSV"""
-        return await self.sheet_exporter.export_to_csv()
+        return await self.sheet_exporter.export_to_csv(event_id=event_id)
 
-    async def export_deleted_users_to_csv(self):
+    async def export_deleted_users_to_csv(self, event_id: Optional[str] = None):
         """Export deleted users to CSV"""
-        return await self.sheet_exporter.export_deleted_users_to_csv()
+        return await self.sheet_exporter.export_deleted_users_to_csv(event_id=event_id)
 
-    async def export_feedback_to_sheets(self):
+    async def export_feedback_to_sheets(self, event_id: Optional[str] = None):
         """Export feedback to Google Sheets"""
-        return await self.sheet_exporter.export_feedback_to_sheets()
+        return await self.sheet_exporter.export_feedback_to_sheets(event_id=event_id)
 
-    async def export_feedback_to_csv(self):
+    async def export_feedback_to_csv(self, event_id: Optional[str] = None):
         """Export feedback to CSV"""
-        return await self.sheet_exporter.export_feedback_to_csv()
+        return await self.sheet_exporter.export_feedback_to_csv(event_id=event_id)
 
     async def log_to_chat(
         self, message: str, chat_type: str = "logs"
@@ -1068,55 +1069,55 @@ class App:
     async def _fix_database(self) -> Dict[str, int]:
         """
         Fix the database by setting payment_status to "confirmed" for:
-        1. All users in Belgrade (free event)
-        2. All users with graduate_type=TEACHER (free for teachers)
-        3. All users with graduate_type=ORGANIZER (free for organizers)
+        1. Registrations for free events (pricing_type == "free")
+        2. Registrations where the user's graduate_type is in event.free_for_types
+
+        Uses event properties instead of hardcoded city names or graduate types.
 
         Returns:
             Dictionary with counts of fixed records for each category
         """
         results = {
-            "belgrade_fixed": 0,
-            "teachers_fixed": 0,
-            "organizers_fixed": 0,
+            "free_events_fixed": 0,
+            "free_types_fixed": 0,
             "total_fixed": 0,
         }
 
-        # Fix Belgrade registrations
-        belgrade_result = await self.collection.update_many(
-            {
-                "target_city": "Белград",
-                "payment_status": {"$ne": "confirmed"},
-            },
-            {"$set": {"payment_status": "confirmed"}},
-        )
-        results["belgrade_fixed"] = belgrade_result.modified_count
+        # Get all events to build lookup
+        all_events = await self.get_all_events()
 
-        # Fix teacher registrations
-        teachers_result = await self.collection.update_many(
-            {
-                "graduate_type": GraduateType.TEACHER.value,
-                "payment_status": {"$ne": "confirmed"},
-            },
-            {"$set": {"payment_status": "confirmed"}},
-        )
-        results["teachers_fixed"] = teachers_result.modified_count
+        # Fix registrations for free events
+        free_event_ids = [
+            str(ev["_id"]) for ev in all_events if ev.get("pricing_type") == "free"
+        ]
+        if free_event_ids:
+            free_result = await self.collection.update_many(
+                {
+                    "event_id": {"$in": free_event_ids},
+                    "payment_status": {"$ne": "confirmed"},
+                },
+                {"$set": {"payment_status": "confirmed"}},
+            )
+            results["free_events_fixed"] = free_result.modified_count
 
-        # Fix organizer registrations
-        organizers_result = await self.collection.update_many(
-            {
-                "graduate_type": GraduateType.ORGANIZER.value,
-                "payment_status": {"$ne": "confirmed"},
-            },
-            {"$set": {"payment_status": "confirmed"}},
-        )
-        results["organizers_fixed"] = organizers_result.modified_count
+        # Fix registrations where graduate_type is in event's free_for_types
+        for ev in all_events:
+            free_types = ev.get("free_for_types", [])
+            if not free_types:
+                continue
+            event_id = str(ev["_id"])
+            type_result = await self.collection.update_many(
+                {
+                    "event_id": event_id,
+                    "graduate_type": {"$in": free_types},
+                    "payment_status": {"$ne": "confirmed"},
+                },
+                {"$set": {"payment_status": "confirmed"}},
+            )
+            results["free_types_fixed"] += type_result.modified_count
 
-        # Calculate total fixed
         results["total_fixed"] = (
-            results["belgrade_fixed"]
-            + results["teachers_fixed"]
-            + results["organizers_fixed"]
+            results["free_events_fixed"] + results["free_types_fixed"]
         )
 
         # Log the fix operation if any records were updated
@@ -1124,9 +1125,8 @@ class App:
             log_data = {
                 "action": "fix_database",
                 "modified_count": results["total_fixed"],
-                "belgrade_fixed": results["belgrade_fixed"],
-                "teachers_fixed": results["teachers_fixed"],
-                "organizers_fixed": results["organizers_fixed"],
+                "free_events_fixed": results["free_events_fixed"],
+                "free_types_fixed": results["free_types_fixed"],
             }
             await self.save_event_log("admin_action", log_data)
 
@@ -1267,12 +1267,15 @@ class App:
 
         return result.deleted_count > 0
 
-    async def has_provided_feedback(self, user_id: int) -> bool:
+    async def has_provided_feedback(
+        self, user_id: int, event_id: Optional[str] = None
+    ) -> bool:
         """
-        Check if a user has already provided feedback
+        Check if a user has already provided feedback.
 
         Args:
             user_id: The user's Telegram ID
+            event_id: Optional event ID to check feedback for a specific event
 
         Returns:
             True if user has provided feedback, False otherwise
@@ -1280,5 +1283,8 @@ class App:
         if not hasattr(self, "_feedback_collection"):
             self._feedback_collection = get_database().get_collection("feedback")
 
-        feedback = await self._feedback_collection.find_one({"user_id": user_id})
+        query: Dict = {"user_id": user_id}
+        if event_id:
+            query["event_id"] = event_id
+        feedback = await self._feedback_collection.find_one(query)
         return feedback is not None
