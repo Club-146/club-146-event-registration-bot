@@ -467,7 +467,11 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
         announcement_text = default_message
 
     # Format audience description for confirmation
-    audience_desc = "все пользователи за всё время" if audience == "all_time" else "текущие зарегистрированные"
+    audience_desc = (
+        "все пользователи за всё время"
+        if audience == "all_time"
+        else "текущие зарегистрированные"
+    )
     if city_filter != "all" and city_filter in event_map:
         audience_desc += f" ({event_map[city_filter].get('city', city_filter)})"
 

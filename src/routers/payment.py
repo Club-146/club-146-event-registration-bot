@@ -483,7 +483,9 @@ async def process_payment(
                 user_info += f"💰 Сумма к оплате: {needs_to_pay}\n"
 
             # Get user registration for additional info (use event-specific lookup)
-            user_registration = await app.collection.find_one({"user_id": user_id, "event_id": event_id})
+            user_registration = await app.collection.find_one(
+                {"user_id": user_id, "event_id": event_id}
+            )
             if user_registration:
                 user_info += (
                     f"👤 ФИО: {user_registration.get('full_name', 'Неизвестно')}\n"
