@@ -379,8 +379,24 @@ class App:
         return regular_price, discounted_price
 
     async def _update_event_statuses(self):
-        """Mark events as 'passed' if their date is in the past."""
+        """Mark events as 'passed' if date is in the past, 'archived' if older than 3 months."""
         now = datetime.now()
+
+        # Auto-archive events older than 3 months
+        from dateutil.relativedelta import relativedelta
+
+        archive_cutoff = now - relativedelta(months=3)
+        archived = await self.events_col.update_many(
+            {
+                "date": {"$lt": archive_cutoff},
+                "status": {"$in": ["upcoming", "registration_closed", "passed"]},
+            },
+            {"$set": {"status": "archived", "enabled": False, "updated_at": now}},
+        )
+        if archived.modified_count > 0:
+            logger.info(f"Auto-archived {archived.modified_count} events older than 3 months.")
+
+        # Mark recent past events as 'passed'
         result = await self.events_col.update_many(
             {
                 "date": {"$lt": now},

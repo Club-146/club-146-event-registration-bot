@@ -562,14 +562,15 @@ class TestUpdateEventStatuses:
     async def test_no_modified(self, app):
         app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
         await app._update_event_statuses()
-        app.events_col.update_many.assert_called_once()
+        # Called twice: auto-archive (>3 months) + mark passed
+        assert app.events_col.update_many.call_count == 2
 
     @pytest.mark.asyncio
     async def test_some_modified(self, app):
-        """Exercises lines 389-390: modified_count > 0 -> logger.info."""
+        """Exercises modified_count > 0 -> logger.info."""
         app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=3))
         await app._update_event_statuses()
-        app.events_col.update_many.assert_called_once()
+        assert app.events_col.update_many.call_count == 2
 
 
 class TestGetUserActiveRegistrations:

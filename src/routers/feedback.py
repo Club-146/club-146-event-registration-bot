@@ -237,7 +237,7 @@ async def _ask_attended_city(message, state, app: App, feedback_data: dict) -> t
     all_events = await app.get_all_events()
     for ev in all_events:
         status = ev.get("status", "")
-        if status in ("archived", "passed"):
+        if status == "passed":
             ev_id = str(ev["_id"])
             from src.router import get_event_date_display
 
