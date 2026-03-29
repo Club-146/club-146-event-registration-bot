@@ -161,16 +161,35 @@ async def _format_single_reg_info(reg: Dict, app: App) -> str:
     return info_text, event_is_free
 
 
-async def _show_past_registrations(message: Message, past_regs: List[Dict], app: App):
-    """Show read-only history of past registrations."""
-    info_text = "📅 Ваши прошлые регистрации:\n\n"
-    for reg in past_regs:
-        event = await app.get_event_for_registration(reg)
-        city = reg["target_city"]
+async def _show_past_events_history(message: Message, app: App, user_id: int):
+    """Show all past events with participant counts and user attendance."""
+    all_events = await app.get_all_events()
+    past_events = [
+        e for e in all_events
+        if e.get("status") in ("passed", "archived")
+    ]
+
+    if not past_events:
+        await send_safe(
+            message.chat.id,
+            "Пока нет прошедших встреч.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    # Get user's registrations to check attendance
+    user_regs = await app.get_user_registrations(user_id)
+    user_event_ids = {reg.get("event_id") for reg in user_regs}
+
+    info_text = "📅 История встреч выпускников:\n\n"
+    for event in past_events:
+        eid = str(event["_id"])
         date_str = get_event_date_display(event)
-        payment_status = reg.get("payment_status", "")
-        status_emoji = _payment_status_emoji(payment_status) if payment_status else ""
-        info_text += f"• {city} ({date_str}) {status_emoji}\n"
+        city = event.get("city", "?")
+        count = await app.get_registration_count_for_event(eid)
+        attended = "✅" if eid in user_event_ids else "—"
+        info_text += f"{attended} {city} ({date_str}) — {count} чел.\n"
+
     info_text += "\nСледите за новостями — будем рады видеть вас на следующих встречах!"
     await send_safe(message.chat.id, info_text, reply_markup=ReplyKeyboardRemove())
 
@@ -206,7 +225,7 @@ async def handle_registered_user(
 
     if not future_regs:
         # Only past registrations — show history
-        await _show_past_registrations(message, past_regs, app)
+        await _show_past_events_history(message, app, message.from_user.id)
         return
 
     if len(future_regs) > 1:
@@ -1821,17 +1840,7 @@ async def start_handler(message: Message, state: FSMContext, app: App):
     upcoming_events = [e for e in enabled_events if not app.is_event_passed(e)]
 
     if not upcoming_events:
-        # Show past registrations if user has any
-        user_regs = await app.get_user_registrations(message.from_user.id)
-        if user_regs:
-            await _show_past_registrations(message, user_regs, app)
-        else:
-            await send_safe(
-                message.chat.id,
-                "Все встречи выпускников уже прошли. Спасибо, что были с нами! 🎓\n\n"
-                "Следите за новостями в группе школы, чтобы не пропустить следующие встречи.",
-                reply_markup=ReplyKeyboardRemove(),
-            )
+        await _show_past_events_history(message, app, message.from_user.id)
         return
 
     active_registrations = await app.get_user_active_registrations(message.from_user.id)
