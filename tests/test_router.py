@@ -1,6 +1,7 @@
 import pytest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import User
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
@@ -468,3 +469,454 @@ def test_format_registration_status_text_multiple():
     assert "Пермь" in result
     assert "Иван" in result
     assert "Мария" in result
+
+
+# ---- Tests for get_event_date_display with year auto-append ----
+
+
+def test_get_event_date_display_appends_year_for_past_events():
+    from src.router import get_event_date_display
+
+    event = {"date_display": "21 Марта, Сб", "date": datetime(2023, 3, 21)}
+    result = get_event_date_display(event)
+    assert "2023" in result
+    assert result == "21 Марта, Сб 2023"
+
+
+def test_get_event_date_display_no_year_for_current_year():
+    from src.router import get_event_date_display
+
+    event = {
+        "date_display": "21 Марта, Сб",
+        "date": datetime(datetime.now().year, 3, 21),
+    }
+    result = get_event_date_display(event)
+    assert str(datetime.now().year) not in result
+    assert result == "21 Марта, Сб"
+
+
+def test_get_event_date_display_no_date_field():
+    """When event has date_display but no date field, just returns date_display."""
+    from src.router import get_event_date_display
+
+    event = {"date_display": "21 Марта, Сб"}
+    result = get_event_date_display(event)
+    assert result == "21 Марта, Сб"
+
+
+def test_get_event_date_display_future_year():
+    from src.router import get_event_date_display
+
+    event = {"date_display": "15 Июня, Вт", "date": datetime(2099, 6, 15)}
+    result = get_event_date_display(event)
+    assert "2099" in result
+
+
+# ---- Tests for _show_past_events_history ----
+
+
+@pytest.mark.asyncio
+async def test_show_past_events_history_no_past_events(
+    mock_message, mock_send_safe, _mock_botspot_dependencies
+):
+    from src.router import _show_past_events_history
+
+    mock_app = MagicMock()
+    mock_app.get_all_events = AsyncMock(return_value=[])
+
+    await _show_past_events_history(mock_message, mock_app, 12345)
+
+    mock_send_safe.assert_called_once()
+    args = mock_send_safe.call_args[0]
+    assert "нет прошедших встреч" in args[1].lower()
+
+
+@pytest.mark.asyncio
+async def test_show_past_events_history_with_events(
+    mock_message, mock_send_safe, _mock_botspot_dependencies
+):
+    from src.router import _show_past_events_history
+
+    past_events = [
+        {
+            "_id": "ev1",
+            "city": "Москва",
+            "date_display": "10 Января",
+            "date": datetime(2024, 1, 10),
+            "status": "passed",
+        },
+        {
+            "_id": "ev2",
+            "city": "Пермь",
+            "date_display": "5 Марта",
+            "date": datetime(2024, 3, 5),
+            "status": "archived",
+        },
+    ]
+    # One active event that should be excluded
+    all_events = past_events + [
+        {
+            "_id": "ev3",
+            "city": "Казань",
+            "date_display": "20 Декабря",
+            "status": "upcoming",
+        }
+    ]
+
+    mock_app = MagicMock()
+    mock_app.get_all_events = AsyncMock(return_value=all_events)
+    mock_app.get_user_registrations = AsyncMock(
+        return_value=[{"event_id": "ev1"}]
+    )
+    mock_app.get_registration_count_for_event = AsyncMock(side_effect=[42, 15])
+
+    await _show_past_events_history(mock_message, mock_app, 12345)
+
+    mock_send_safe.assert_called_once()
+    text = mock_send_safe.call_args[0][1]
+    # Attended ev1 — should have checkmark
+    assert "✅" in text
+    assert "Москва" in text
+    assert "42" in text
+    # Did not attend ev2 — should have dash
+    assert "—" in text
+    assert "Пермь" in text
+    assert "15" in text
+    # Active event should NOT appear
+    assert "Казань" not in text
+
+
+@pytest.mark.asyncio
+async def test_show_past_events_history_user_attended_none(
+    mock_message, mock_send_safe, _mock_botspot_dependencies
+):
+    from src.router import _show_past_events_history
+
+    mock_app = MagicMock()
+    mock_app.get_all_events = AsyncMock(
+        return_value=[
+            {
+                "_id": "ev1",
+                "city": "Москва",
+                "date_display": "10 Января",
+                "date": datetime(2024, 1, 10),
+                "status": "passed",
+            }
+        ]
+    )
+    mock_app.get_user_registrations = AsyncMock(return_value=[])
+    mock_app.get_registration_count_for_event = AsyncMock(return_value=10)
+
+    await _show_past_events_history(mock_message, mock_app, 12345)
+
+    text = mock_send_safe.call_args[0][1]
+    assert "✅" not in text
+    assert "—" in text
+
+
+# ---- Tests for handle_registered_user future/past split ----
+
+
+@pytest.mark.asyncio
+async def test_handle_registered_user_no_active_registrations(
+    mock_message, mock_state, mock_send_safe, _mock_botspot_dependencies
+):
+    from src.router import handle_registered_user
+
+    mock_app = MagicMock()
+    mock_app.get_user_active_registrations = AsyncMock(return_value=[])
+
+    await handle_registered_user(mock_message, mock_state, {}, mock_app)
+
+    mock_send_safe.assert_called_once()
+    text = mock_send_safe.call_args[0][1]
+    assert "нет активных регистраций" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_registered_user_only_past_shows_history(
+    mock_message, mock_state, mock_send_safe, _mock_botspot_dependencies
+):
+    """When all registrations are for past events, show history instead of management."""
+    from src.router import handle_registered_user
+
+    past_reg = {"target_city": "Москва", "event_id": "ev1"}
+    past_event = {
+        "_id": "ev1",
+        "city": "Москва",
+        "date_display": "10 Января",
+        "date": datetime(2024, 1, 10),
+        "status": "passed",
+    }
+
+    mock_app = MagicMock()
+    mock_app.get_user_active_registrations = AsyncMock(return_value=[past_reg])
+    mock_app.get_event_for_registration = AsyncMock(return_value=past_event)
+    mock_app.is_event_passed = MagicMock(return_value=True)
+    # Mocks for _show_past_events_history
+    mock_app.get_all_events = AsyncMock(return_value=[past_event])
+    mock_app.get_user_registrations = AsyncMock(
+        return_value=[{"event_id": "ev1"}]
+    )
+    mock_app.get_registration_count_for_event = AsyncMock(return_value=30)
+
+    await handle_registered_user(mock_message, mock_state, past_reg, mock_app)
+
+    # Should have called send_safe with history text
+    text = mock_send_safe.call_args[0][1]
+    assert "история" in text.lower() or "встреч" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_registered_user_future_reg_goes_to_single(
+    mock_message, mock_state, _mock_botspot_dependencies
+):
+    """A single future registration routes to _handle_single_registration."""
+    from src.router import handle_registered_user
+
+    future_reg = {
+        "target_city": "Москва",
+        "event_id": "ev1",
+        "full_name": "Тест Тестов",
+        "graduation_year": 2010,
+        "class_letter": "А",
+    }
+    future_event = {
+        "_id": "ev1",
+        "city": "Москва",
+        "date_display": "21 Марта",
+        "date": datetime(2099, 3, 21),
+        "pricing_type": "formula",
+        "free_for_types": [],
+    }
+
+    mock_app = MagicMock()
+    mock_app.get_user_active_registrations = AsyncMock(return_value=[future_reg])
+    mock_app.get_event_for_registration = AsyncMock(return_value=future_event)
+    mock_app.is_event_passed = MagicMock(return_value=False)
+
+    with patch("src.router._handle_single_registration", new_callable=AsyncMock) as mock_single:
+        await handle_registered_user(mock_message, mock_state, future_reg, mock_app)
+        mock_single.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_registered_user_multiple_future_regs_goes_to_multi(
+    mock_message, mock_state, _mock_botspot_dependencies
+):
+    """Multiple future registrations route to _handle_multi_registrations."""
+    from src.router import handle_registered_user
+
+    future_reg1 = {"target_city": "Москва", "event_id": "ev1"}
+    future_reg2 = {"target_city": "Пермь", "event_id": "ev2"}
+    future_event = {
+        "date": datetime(2099, 6, 15),
+        "city": "Test",
+        "date_display": "15 Июня",
+    }
+
+    mock_app = MagicMock()
+    mock_app.get_user_active_registrations = AsyncMock(
+        return_value=[future_reg1, future_reg2]
+    )
+    mock_app.get_event_for_registration = AsyncMock(return_value=future_event)
+    mock_app.is_event_passed = MagicMock(return_value=False)
+
+    with patch("src.router._handle_multi_registrations", new_callable=AsyncMock) as mock_multi:
+        await handle_registered_user(mock_message, mock_state, future_reg1, mock_app)
+        mock_multi.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_registered_user_mixed_past_and_future(
+    mock_message, mock_state, _mock_botspot_dependencies
+):
+    """With a mix of past and future regs, only future regs are passed to handler."""
+    from src.router import handle_registered_user
+
+    past_reg = {"target_city": "Москва", "event_id": "ev1"}
+    future_reg = {"target_city": "Пермь", "event_id": "ev2"}
+
+    past_event = {"date": datetime(2020, 1, 1), "city": "Москва", "date_display": "1 Января"}
+    future_event = {"date": datetime(2099, 6, 15), "city": "Пермь", "date_display": "15 Июня"}
+
+    mock_app = MagicMock()
+    mock_app.get_user_active_registrations = AsyncMock(
+        return_value=[past_reg, future_reg]
+    )
+
+    async def get_event_side_effect(reg):
+        if reg["event_id"] == "ev1":
+            return past_event
+        return future_event
+
+    mock_app.get_event_for_registration = AsyncMock(side_effect=get_event_side_effect)
+    mock_app.is_event_passed = MagicMock(
+        side_effect=lambda e: e["date"] < datetime.now()
+    )
+
+    with patch("src.router._handle_single_registration", new_callable=AsyncMock) as mock_single:
+        await handle_registered_user(mock_message, mock_state, future_reg, mock_app)
+        mock_single.assert_called_once()
+        # Verify only the future registration was passed
+        called_reg = mock_single.call_args[0][2]
+        assert called_reg["target_city"] == "Пермь"
+
+
+@pytest.mark.asyncio
+async def test_handle_registered_user_none_from_user(
+    mock_state, _mock_botspot_dependencies
+):
+    """When message.from_user is None, handler returns early."""
+    from src.router import handle_registered_user
+
+    message = AsyncMock()
+    message.from_user = None
+
+    mock_app = MagicMock()
+    mock_app.get_user_active_registrations = AsyncMock()
+
+    await handle_registered_user(message, mock_state, {}, mock_app)
+
+    mock_app.get_user_active_registrations.assert_not_called()
+
+
+# ---- get_event_date_display year auto-append tests ----
+
+
+class TestGetEventDateDisplayYear:
+    def test_appends_year_for_past_events(self):
+        from src.router import get_event_date_display
+
+        event = {"date_display": "28 Марта, Сб", "date": datetime(2023, 3, 28)}
+        result = get_event_date_display(event)
+        assert "2023" in result
+        assert result == "28 Марта, Сб 2023"
+
+    def test_no_year_for_current_year(self):
+        from src.router import get_event_date_display
+
+        event = {
+            "date_display": "28 Марта, Сб",
+            "date": datetime(datetime.now().year, 3, 28),
+        }
+        result = get_event_date_display(event)
+        assert str(datetime.now().year) not in result
+        assert result == "28 Марта, Сб"
+
+    def test_no_date_field(self):
+        from src.router import get_event_date_display
+
+        event = {"date_display": "28 Марта, Сб"}
+        result = get_event_date_display(event)
+        assert result == "28 Марта, Сб"
+
+    def test_none_event(self):
+        from src.router import get_event_date_display
+
+        assert get_event_date_display(None) == "дата неизвестна"
+
+
+# ---- _show_past_events_history tests ----
+
+
+class TestShowPastEventsHistory:
+    @pytest.mark.asyncio
+    async def test_no_past_events(self, mock_message, mock_app, mock_send_safe):
+        from src.router import _show_past_events_history
+
+        mock_app.get_all_events = AsyncMock(return_value=[])
+        await _show_past_events_history(mock_message, mock_app, 12345)
+        mock_send_safe.assert_called_once()
+        assert "Пока нет" in mock_send_safe.call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_with_events_and_attendance(
+        self, mock_message, mock_app, mock_send_safe
+    ):
+        from src.router import _show_past_events_history
+
+        mock_app.get_all_events = AsyncMock(
+            return_value=[
+                {
+                    "_id": "e1",
+                    "city": "Москва",
+                    "date": datetime(2025, 4, 5),
+                    "date_display": "5 Апреля, Сб",
+                    "status": "passed",
+                },
+                {
+                    "_id": "e2",
+                    "city": "СПБ",
+                    "date": datetime(2025, 3, 28),
+                    "date_display": "28 Марта, Сб",
+                    "status": "archived",
+                },
+            ]
+        )
+        mock_app.get_user_registrations = AsyncMock(
+            return_value=[{"event_id": "e1"}]
+        )
+        mock_app.get_registration_count_for_event = AsyncMock(return_value=42)
+
+        await _show_past_events_history(mock_message, mock_app, 12345)
+        text = mock_send_safe.call_args[0][1]
+        assert "✅" in text  # attended e1
+        assert "—" in text  # didn't attend e2
+        assert "42 чел." in text
+
+
+# ---- handle_registered_user future/past split tests ----
+
+
+class TestHandleRegisteredUserSplit:
+    @pytest.mark.asyncio
+    async def test_only_past_shows_history(
+        self, mock_message, mock_state, mock_app, mock_send_safe
+    ):
+        from src.router import handle_registered_user
+
+        past_reg = {
+            "event_id": "e1",
+            "target_city": "Москва",
+            "payment_status": "confirmed",
+        }
+        mock_app.get_user_active_registrations = AsyncMock(return_value=[past_reg])
+        past_event = {
+            "_id": "e1",
+            "city": "Москва",
+            "date": datetime(2025, 1, 1),
+            "date_display": "1 Января, Ср",
+            "status": "passed",
+        }
+        mock_app.get_event_for_registration = AsyncMock(return_value=past_event)
+        mock_app.is_event_passed = MagicMock(return_value=True)
+        mock_app.get_all_events = AsyncMock(return_value=[past_event])
+        mock_app.get_user_registrations = AsyncMock(
+            return_value=[{"event_id": "e1"}]
+        )
+        mock_app.get_registration_count_for_event = AsyncMock(return_value=10)
+
+        await handle_registered_user(mock_message, mock_state, past_reg, mock_app)
+        text = mock_send_safe.call_args[0][1]
+        assert "История" in text or "✅" in text
+
+    @pytest.mark.asyncio
+    @patch("src.router._handle_single_registration", new_callable=AsyncMock)
+    async def test_future_reg_goes_to_single(
+        self, mock_single, mock_message, mock_state, mock_app
+    ):
+        from src.router import handle_registered_user
+
+        reg = {"event_id": "e1", "target_city": "Москва"}
+        mock_app.get_user_active_registrations = AsyncMock(return_value=[reg])
+        future_event = {
+            "_id": "e1",
+            "date": datetime(2099, 12, 31),
+            "status": "upcoming",
+        }
+        mock_app.get_event_for_registration = AsyncMock(return_value=future_event)
+        mock_app.is_event_passed = MagicMock(return_value=False)
+
+        await handle_registered_user(mock_message, mock_state, reg, mock_app)
+        mock_single.assert_called_once()
