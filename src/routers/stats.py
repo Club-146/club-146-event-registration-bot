@@ -256,7 +256,7 @@ def _compute_payment_ratios(payments):
     return ratios_formula, ratios_regular, ratios_discounted
 
 
-def _format_payment_status_block(stat, PAYMENT_STATUS_MAP, label_prefix=""):
+def _format_payment_status_block(stat, PAYMENT_STATUS_MAP):
     lines = []
     if stat:
         lines.append(

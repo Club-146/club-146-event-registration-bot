@@ -129,7 +129,7 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
 
 async def admin_register_payment(message: Message, state: FSMContext, app: App):
     """Admin flow: select event → pick unpaid user → confirm payment."""
-    from src.router import get_event_date_display, is_event_free
+    from src.router import get_event_date_display
 
     all_events = await app.get_all_events()
     non_archived = [e for e in all_events if e.get("status") != "archived"]
@@ -167,7 +167,11 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
     user_choices["manual"] = "Ввести username вручную"
     user_choices["cancel"] = "Отмена"
 
-    header = f"Неоплаченные участники ({len(unpaid_users)}):" if unpaid_users else "Все оплатили! Но можно добавить вручную:"
+    header = (
+        f"Неоплаченные участники ({len(unpaid_users)}):"
+        if unpaid_users
+        else "Все оплатили! Но можно добавить вручную:"
+    )
     chosen_user = await ask_user_choice(
         message.chat.id,
         header,
@@ -189,7 +193,7 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
         if not username_input:
             await send_safe(message.chat.id, "Время ожидания истекло.")
             return
-        username_clean = username_input.lstrip("@").strip()
+        username_clean = str(username_input).lstrip("@").strip()
         reg = await app.collection.find_one(
             {"username": username_clean, "event_id": selected}
         )
@@ -225,7 +229,7 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
         return
 
     try:
-        amount = int(amount_input.strip())
+        amount = int(str(amount_input).strip())
     except ValueError:
         await send_safe(message.chat.id, "Неверный формат суммы.")
         return

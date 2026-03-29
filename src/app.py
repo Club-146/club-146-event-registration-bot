@@ -394,7 +394,9 @@ class App:
             {"$set": {"status": "archived", "enabled": False, "updated_at": now}},
         )
         if archived.modified_count > 0:
-            logger.info(f"Auto-archived {archived.modified_count} events older than 3 months.")
+            logger.info(
+                f"Auto-archived {archived.modified_count} events older than 3 months."
+            )
 
         # Mark recent past events as 'passed'
         result = await self.events_col.update_many(

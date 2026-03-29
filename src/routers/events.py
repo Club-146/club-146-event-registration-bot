@@ -999,9 +999,7 @@ async def manage_events_handler(message: Message, state: FSMContext, app: App):
             for e in all_events
             if e.get("status") in ("upcoming", "registration_closed", "passed")
         ]
-        archived_events = [
-            e for e in all_events if e.get("status") == "archived"
-        ]
+        archived_events = [e for e in all_events if e.get("status") == "archived"]
 
         choices = {}
         if active_events:

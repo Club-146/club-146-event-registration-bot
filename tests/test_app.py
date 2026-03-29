@@ -352,6 +352,7 @@ class TestExportPassThrough:
         self.app.sheet_exporter.export_registered_users.assert_not_called()
         # Wait for debounce to fire
         import asyncio
+
         await asyncio.sleep(0.2)
         self.app.sheet_exporter.export_registered_users.assert_called_once_with(
             event_id="abc"

@@ -164,10 +164,7 @@ async def _format_single_reg_info(reg: Dict, app: App) -> str:
 async def _show_past_events_history(message: Message, app: App, user_id: int):
     """Show all past events with participant counts and user attendance."""
     all_events = await app.get_all_events()
-    past_events = [
-        e for e in all_events
-        if e.get("status") in ("passed", "archived")
-    ]
+    past_events = [e for e in all_events if e.get("status") in ("passed", "archived")]
 
     if not past_events:
         await send_safe(
@@ -697,9 +694,7 @@ async def _ask_city_choice(
 ):
     """Ask the user to choose a city. Returns (event, location) or (None, None)."""
     available_events = [
-        e
-        for e in enabled_events
-        if str(e["_id"]) not in existing_event_ids
+        e for e in enabled_events if str(e["_id"]) not in existing_event_ids
     ]
 
     if not available_events:
@@ -797,8 +792,10 @@ async def _select_event_for_registration(
     # Also include passed (not archived) events for post-factum registration
     all_events = await app.get_all_events()
     passed_events = [
-        e for e in all_events
-        if e.get("status") == "passed" and str(e["_id"]) not in {str(x["_id"]) for x in enabled_events}
+        e
+        for e in all_events
+        if e.get("status") == "passed"
+        and str(e["_id"]) not in {str(x["_id"]) for x in enabled_events}
     ]
     all_selectable = enabled_events + passed_events
     event_map = {str(e["_id"]): e for e in all_selectable}
@@ -1129,7 +1126,8 @@ async def _finalize_free_registration(
         )
         await send_safe(
             message.chat.id,
-            confirmation_msg + "\nСейчас пришлем информацию об оплате за гостей...\n\nЕсли передумаете — используйте /cancel_registration для отмены.",
+            confirmation_msg
+            + "\nСейчас пришлем информацию об оплате за гостей...\n\nЕсли передумаете — используйте /cancel_registration для отмены.",
         )
         from src.routers.payment import process_payment
 
@@ -1150,7 +1148,9 @@ async def _finalize_free_registration(
             admin_comment=comment,
             payment_amount=0,
         )
-        confirmation_msg += "\n\nЕсли передумаете — используйте /cancel_registration для отмены."
+        confirmation_msg += (
+            "\n\nЕсли передумаете — используйте /cancel_registration для отмены."
+        )
         await send_safe(
             message.chat.id, confirmation_msg, reply_markup=ReplyKeyboardRemove()
         )
@@ -1881,8 +1881,12 @@ async def start_handler(message: Message, state: FSMContext, app: App):
                 state=state,
             )
             if want_register:
-                existing_registration = await app.get_user_registration(message.from_user.id)
-                await register_user(message, state, app, reuse_info=existing_registration)
+                existing_registration = await app.get_user_registration(
+                    message.from_user.id
+                )
+                await register_user(
+                    message, state, app, reuse_info=existing_registration
+                )
             return
         await _show_past_events_history(message, app, message.from_user.id)
         return
@@ -1903,7 +1907,9 @@ async def start_handler(message: Message, state: FSMContext, app: App):
             )
 
 
-async def _handle_admin_forwarded_payment(message: Message, state: FSMContext, app: App):
+async def _handle_admin_forwarded_payment(
+    message: Message, state: FSMContext, app: App
+):
     """Admin forwarded a photo/PDF from a user — process as their payment proof."""
     from aiogram.types import MessageOriginUser
     from src.routers.payment import process_payment
@@ -1930,7 +1936,10 @@ async def _handle_admin_forwarded_payment(message: Message, state: FSMContext, a
     for reg in registrations:
         event = await app.get_event_for_registration(reg)
         graduate_type_val = reg.get("graduate_type", GraduateType.GRADUATE.value)
-        if not is_event_free(event, graduate_type_val) and reg.get("payment_status") != "confirmed":
+        if (
+            not is_event_free(event, graduate_type_val)
+            and reg.get("payment_status") != "confirmed"
+        ):
             payment_regs.append(reg)
 
     if not payment_regs:
@@ -1963,9 +1972,7 @@ async def _handle_admin_forwarded_payment(message: Message, state: FSMContext, a
 
 
 @router.message(F.photo, F.chat.type == "private")
-@router.message(
-    F.document, F.chat.type == "private"
-)
+@router.message(F.document, F.chat.type == "private")
 async def photo_document_handler(message: Message, state: FSMContext, app: App):
     """Auto-treat photos and PDFs as payment proof without requiring /pay first."""
     if message.from_user is None:
@@ -2001,7 +2008,10 @@ async def photo_document_handler(message: Message, state: FSMContext, app: App):
     for reg in registrations:
         event = await app.get_event_for_registration(reg)
         graduate_type_val = reg.get("graduate_type", GraduateType.GRADUATE.value)
-        if not is_event_free(event, graduate_type_val) and reg.get("payment_status") != "confirmed":
+        if (
+            not is_event_free(event, graduate_type_val)
+            and reg.get("payment_status") != "confirmed"
+        ):
             payment_registrations.append(reg)
 
     if not payment_registrations:
