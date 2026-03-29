@@ -997,21 +997,29 @@ async def manage_events_handler(message: Message, state: FSMContext, app: App):
         active_events = [
             e
             for e in all_events
-            if e.get("status") in ("upcoming", "registration_closed")
+            if e.get("status") in ("upcoming", "registration_closed", "passed")
         ]
         archived_events = [
-            e for e in all_events if e.get("status") in ("archived", "passed")
+            e for e in all_events if e.get("status") == "archived"
         ]
 
         choices = {}
         if active_events:
+            from src.router import get_event_date_display
+
             for ev in active_events:
                 eid = str(ev["_id"])
                 reg_count = await app.get_registration_count_for_event(eid)
-                enabled_mark = "✅" if ev.get("enabled") else "⏸️"
+                status = ev.get("status", "")
+                if status == "passed":
+                    mark = "🕐"
+                elif ev.get("enabled"):
+                    mark = "✅"
+                else:
+                    mark = "⏸️"
                 choices[eid] = (
-                    f"{enabled_mark} {ev.get('city', '?')} "
-                    f"({ev.get('date_display', '?')}) - {reg_count} рег."
+                    f"{mark} {ev.get('city', '?')} "
+                    f"({get_event_date_display(ev)}) - {reg_count} рег."
                 )
 
         choices["show_archive"] = f"📦 Архив ({len(archived_events)} встреч)"
