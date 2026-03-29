@@ -1034,12 +1034,34 @@ async def manage_events_handler(message: Message, state: FSMContext, app: App):
                 await send_safe(message.chat.id, "Архив пуст.")
                 continue
 
-            archive_text = "📦 <b>Архив встреч:</b>\n\n"
+            archive_choices = {}
             for ev in archived_events[:20]:
-                archive_text += (
-                    f"• {ev.get('name', '?')} ({ev.get('date_display', '?')})\n"
+                eid = str(ev["_id"])
+                from src.router import get_event_date_display
+
+                archive_choices[eid] = (
+                    f"{ev.get('city', '?')} ({get_event_date_display(ev)})"
                 )
-            await send_safe(message.chat.id, archive_text)
+            archive_choices["back"] = "Назад"
+
+            arch_selection = await ask_user_choice(
+                message.chat.id,
+                "📦 Архив встреч (выберите для разархивации):",
+                choices=archive_choices,
+                state=state,
+                timeout=None,
+            )
+            if arch_selection != "back" and arch_selection:
+                await app.update_event(
+                    arch_selection,
+                    {"status": EventStatus.PASSED, "enabled": False},
+                )
+                arch_event = await app.get_event_by_id(arch_selection)
+                city = arch_event.get("city", "?") if arch_event else "?"
+                await send_safe(
+                    message.chat.id,
+                    f"Встреча {city} разархивирована (статус: прошла).",
+                )
             continue
 
         if not selection:
