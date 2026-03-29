@@ -158,10 +158,6 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
     # Get unpaid users for this event
     unpaid_users = await app.get_unpaid_users(event_id=selected)
 
-    if not unpaid_users:
-        await send_safe(message.chat.id, "Все участники этой встречи уже оплатили!")
-        return
-
     user_choices = {}
     for u in unpaid_users:
         uid = str(u["user_id"]) if u.get("user_id") else f"reg_{u['_id']}"
@@ -171,9 +167,10 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
     user_choices["manual"] = "Ввести username вручную"
     user_choices["cancel"] = "Отмена"
 
+    header = f"Неоплаченные участники ({len(unpaid_users)}):" if unpaid_users else "Все оплатили! Но можно добавить вручную:"
     chosen_user = await ask_user_choice(
         message.chat.id,
-        f"Неоплаченные участники ({len(unpaid_users)}):",
+        header,
         choices=user_choices,
         state=state,
         timeout=None,
