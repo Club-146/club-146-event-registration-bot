@@ -248,8 +248,6 @@ async def ask_user_choice(
 ) -> Optional[str]:
     if isinstance(choices, list):
         choices = {choice: choice for choice in choices}
-    if default_choice is None and choices:
-        default_choice = next(iter(choices.keys()))
 
     keyboard = _build_keyboard(choices, default_choice, highlight_default, columns)
 
@@ -309,8 +307,6 @@ async def ask_user_choice_raw(
 ) -> Optional[Message]:
     if isinstance(choices, list):
         choices = {choice: choice for choice in choices}
-    if default_choice is None and choices:
-        default_choice = next(iter(choices.keys()))
 
     keyboard = _build_keyboard(choices, default_choice, highlight_default, columns)
     displayed_question = (
