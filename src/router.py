@@ -699,13 +699,13 @@ async def _ask_city_choice(
     available_events = [
         e
         for e in enabled_events
-        if not app.is_event_passed(e) and str(e["_id"]) not in existing_event_ids
+        if str(e["_id"]) not in existing_event_ids
     ]
 
     if not available_events:
         await send_safe(
             message.chat.id,
-            "К сожалению, все встречи уже прошли или вы уже зарегистрированы во всех доступных городах.\n\n"
+            "К сожалению, вы уже зарегистрированы во всех доступных городах.\n\n"
             "Следите за новостями в группе школы, чтобы не пропустить следующие встречи.",
             reply_markup=ReplyKeyboardRemove(),
         )
@@ -713,15 +713,18 @@ async def _ask_city_choice(
             user_id,
             username,
             "Нет доступных городов",
-            "Пользователь уже зарегистрирован во всех городах или все встречи прошли",
+            "Пользователь уже зарегистрирован во всех городах",
         )
         await _append_log(user_id, log_msg)
         return None, None
 
-    available_cities = {
-        str(e["_id"]): f"{e['city']} ({e.get('date_display', '')})"
-        for e in available_events
-    }
+    available_cities = {}
+    for e in available_events:
+        eid = str(e["_id"])
+        label = f"{e['city']} ({get_event_date_display(e)})"
+        if app.is_event_passed(e):
+            label += " — уже прошла"
+        available_cities[eid] = label
     available_cities["cancel"] = "Отменить регистрацию"
 
     response = await ask_user_choice(
@@ -744,6 +747,19 @@ async def _ask_city_choice(
         return None, None
 
     selected_event = event_map.get(response)
+
+    # Warn if user picks a passed event
+    if selected_event and app.is_event_passed(selected_event):
+        from src.user_interactions import ask_user_confirmation
+
+        confirmed = await ask_user_confirmation(
+            message.chat.id,
+            f"Встреча в {selected_event['city']} ({get_event_date_display(selected_event)}) уже прошла.\n"
+            "Вы регистрируете оплату постфактум?",
+            state=state,
+        )
+        if not confirmed:
+            return None, None
     location = selected_event["city"] if selected_event else response
 
     log_msg = await app.log_registration_step(
@@ -778,7 +794,14 @@ async def _select_event_for_registration(
     If preselected_city is given, validates and returns early.
     """
     enabled_events = await app.get_enabled_events()
-    event_map = {str(e["_id"]): e for e in enabled_events}
+    # Also include passed (not archived) events for post-factum registration
+    all_events = await app.get_all_events()
+    passed_events = [
+        e for e in all_events
+        if e.get("status") == "passed" and str(e["_id"]) not in {str(x["_id"]) for x in enabled_events}
+    ]
+    all_selectable = enabled_events + passed_events
+    event_map = {str(e["_id"]): e for e in all_selectable}
 
     if preselected_city:
         return await _select_preselected_city(
@@ -789,7 +812,7 @@ async def _select_event_for_registration(
         message,
         state,
         app,
-        enabled_events,
+        all_selectable,
         existing_event_ids,
         event_map,
         user_id,
@@ -1840,6 +1863,27 @@ async def start_handler(message: Message, state: FSMContext, app: App):
     upcoming_events = [e for e in enabled_events if not app.is_event_passed(e)]
 
     if not upcoming_events:
+        # Check for passed events that allow post-factum registration
+        all_events = await app.get_all_events()
+        passed_events = [e for e in all_events if e.get("status") == "passed"]
+        if passed_events:
+            # Show history + offer registration
+            await _show_past_events_history(message, app, message.from_user.id)
+            await send_safe(
+                message.chat.id,
+                "Если хотите зарегистрировать оплату за прошедшую встречу — используйте кнопку ниже.",
+            )
+            from src.user_interactions import ask_user_confirmation
+
+            want_register = await ask_user_confirmation(
+                message.chat.id,
+                "Зарегистрироваться на прошедшую встречу?",
+                state=state,
+            )
+            if want_register:
+                existing_registration = await app.get_user_registration(message.from_user.id)
+                await register_user(message, state, app, reuse_info=existing_registration)
+            return
         await _show_past_events_history(message, app, message.from_user.id)
         return
 
