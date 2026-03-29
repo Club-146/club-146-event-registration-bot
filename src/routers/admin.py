@@ -127,16 +127,18 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
     return response
 
 
-async def admin_register_payment(message: Message, state: FSMContext, app: App):
-    """Admin flow: select event → pick unpaid user → confirm payment."""
+async def _select_event_for_payment(
+    chat_id: int, state: FSMContext, app: App
+) -> Optional[str]:
+    """Select a non-archived event. Returns event_id or None if cancelled/empty."""
     from src.router import get_event_date_display
 
     all_events = await app.get_all_events()
     non_archived = [e for e in all_events if e.get("status") != "archived"]
 
     if not non_archived:
-        await send_safe(message.chat.id, "Нет доступных встреч.")
-        return
+        await send_safe(chat_id, "Нет доступных встреч.")
+        return None
 
     event_choices = {}
     for ev in non_archived:
@@ -145,18 +147,26 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
     event_choices["cancel"] = "Отмена"
 
     selected = await ask_user_choice(
-        message.chat.id,
+        chat_id,
         "Выберите встречу:",
         choices=event_choices,
         state=state,
         timeout=None,
     )
     if selected == "cancel":
-        await send_safe(message.chat.id, "Отменено.")
-        return
+        await send_safe(chat_id, "Отменено.")
+        return None
+    return selected
 
-    # Get unpaid users for this event
-    unpaid_users = await app.get_unpaid_users(event_id=selected)
+
+async def _select_unpaid_user(
+    chat_id: int, state: FSMContext, app: App, event_id: str
+) -> Optional[tuple]:
+    """Pick an unpaid user from list or manual input.
+
+    Returns (reg_doc, user_id, full_name) or None if cancelled/not found.
+    """
+    unpaid_users = await app.get_unpaid_users(event_id=event_id)
 
     user_choices = {}
     for u in unpaid_users:
@@ -173,65 +183,87 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
         else "Все оплатили! Но можно добавить вручную:"
     )
     chosen_user = await ask_user_choice(
-        message.chat.id,
-        header,
-        choices=user_choices,
-        state=state,
-        timeout=None,
+        chat_id, header, choices=user_choices, state=state, timeout=None
     )
     if chosen_user == "cancel":
-        await send_safe(message.chat.id, "Отменено.")
-        return
+        await send_safe(chat_id, "Отменено.")
+        return None
 
     if chosen_user == "manual":
-        username_input = await ask_user_raw(
-            message.chat.id,
-            "Введите Telegram username (с @ или без):",
-            state=state,
-            timeout=300,
-        )
-        if not username_input:
-            await send_safe(message.chat.id, "Время ожидания истекло.")
-            return
-        username_clean = str(username_input).lstrip("@").strip()
-        reg = await app.collection.find_one(
-            {"username": username_clean, "event_id": selected}
-        )
-        if not reg:
-            await send_safe(
-                message.chat.id,
-                f"Пользователь @{username_clean} не найден среди зарегистрированных на эту встречу.",
-            )
-            return
-        target_user_id = reg.get("user_id")
-        target_name = reg.get("full_name", "?")
-    else:
-        # Find the registration
-        reg = next(
-            (u for u in unpaid_users if str(u.get("user_id")) == chosen_user),
-            None,
-        )
-        if not reg:
-            await send_safe(message.chat.id, "Ошибка: пользователь не найден.")
-            return
-        target_user_id = reg.get("user_id")
-        target_name = reg.get("full_name", "?")
+        return await _resolve_manual_user(chat_id, state, app, event_id)
 
-    # Ask for amount
+    # Find from unpaid list
+    reg = next(
+        (u for u in unpaid_users if str(u.get("user_id")) == chosen_user), None
+    )
+    if not reg:
+        await send_safe(chat_id, "Ошибка: пользователь не найден.")
+        return None
+    return reg, reg.get("user_id"), reg.get("full_name", "?")
+
+
+async def _resolve_manual_user(
+    chat_id: int, state: FSMContext, app: App, event_id: str
+) -> Optional[tuple]:
+    """Resolve a manually entered username to a registration."""
+    username_input = await ask_user_raw(
+        chat_id,
+        "Введите Telegram username (с @ или без):",
+        state=state,
+        timeout=300,
+    )
+    if not username_input:
+        await send_safe(chat_id, "Время ожидания истекло.")
+        return None
+    username_clean = str(username_input).lstrip("@").strip()
+    reg = await app.collection.find_one(
+        {"username": username_clean, "event_id": event_id}
+    )
+    if not reg:
+        await send_safe(
+            chat_id,
+            f"Пользователь @{username_clean} не найден среди зарегистрированных на эту встречу.",
+        )
+        return None
+    return reg, reg.get("user_id"), reg.get("full_name", "?")
+
+
+async def _confirm_payment_amount(
+    chat_id: int, state: FSMContext, target_name: str
+) -> Optional[int]:
+    """Ask admin for payment amount. Returns int amount or None on failure."""
     amount_input = await ask_user_raw(
-        message.chat.id,
+        chat_id,
         f"Подтверждаем оплату для {target_name}.\nВведите сумму в рублях:",
         state=state,
         timeout=300,
     )
     if not amount_input:
-        await send_safe(message.chat.id, "Время ожидания истекло.")
-        return
+        await send_safe(chat_id, "Время ожидания истекло.")
+        return None
 
     try:
-        amount = int(str(amount_input).strip())
+        return int(str(amount_input).strip())
     except ValueError:
-        await send_safe(message.chat.id, "Неверный формат суммы.")
+        await send_safe(chat_id, "Неверный формат суммы.")
+        return None
+
+
+async def admin_register_payment(message: Message, state: FSMContext, app: App):
+    """Admin flow: select event → pick unpaid user → confirm payment."""
+    chat_id = message.chat.id
+
+    selected = await _select_event_for_payment(chat_id, state, app)
+    if not selected:
+        return
+
+    user_result = await _select_unpaid_user(chat_id, state, app, selected)
+    if not user_result:
+        return
+    reg, target_user_id, target_name = user_result
+
+    amount = await _confirm_payment_amount(chat_id, state, target_name)
+    if amount is None:
         return
 
     if target_user_id:
@@ -263,7 +295,7 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
         )
 
     await send_safe(
-        message.chat.id,
+        chat_id,
         f"Оплата {amount}₽ подтверждена для {target_name}.",
     )
     await app.export_registered_users_to_google_sheets()
@@ -468,6 +500,40 @@ async def extract_payment_from_image(
         return PaymentInfo(amount=None, is_valid=False)
 
 
+def _get_file_info(response) -> Optional[tuple]:
+    """Extract file_id and file_type from a message with photo or PDF.
+
+    Returns (file_id, file_type) or None if no supported attachment found.
+    """
+    has_photo = response.photo is not None and len(response.photo) > 0
+    has_pdf = (
+        response.document is not None
+        and response.document.mime_type == "application/pdf"
+    )
+    if has_photo and response.photo:
+        return response.photo[-1].file_id, "image/jpeg"
+    if has_pdf and response.document:
+        return response.document.file_id, "application/pdf"
+    return None
+
+
+async def _download_file(file_id: str) -> Optional[bytes]:
+    """Download a Telegram file by file_id. Returns file bytes or None."""
+    from botspot.core.dependency_manager import get_dependency_manager
+
+    bot = get_dependency_manager().bot
+
+    file = await bot.get_file(file_id)
+    if not file or not file.file_path:
+        return None
+
+    file_bytes = await bot.download_file(file.file_path)
+    if not file_bytes:
+        return None
+
+    return file_bytes.read()
+
+
 @commands_menu.add_command(
     "parse_payment", "Анализ платежа с помощью Claude", visibility=Visibility.ADMIN_ONLY
 )
@@ -486,58 +552,26 @@ async def parse_payment_handler(message: Message, state: FSMContext):
         await send_safe(message.chat.id, "Время ожидания истекло.")
         return
 
-    # Check if the message has a photo or document
-    has_photo = response.photo is not None and len(response.photo) > 0
-    has_pdf = (
-        response.document is not None
-        and response.document.mime_type == "application/pdf"
-    )
-
-    if not (has_photo or has_pdf):
+    file_info = _get_file_info(response)
+    if not file_info:
         await send_safe(
             message.chat.id, "Пожалуйста, отправьте изображение или PDF-файл"
         )
         return
 
+    file_id, file_type = file_info
+
     # Send status message
     status_msg = await send_safe(message.chat.id, "⏳ Анализирую платеж...")
 
     try:
-        # Download the file
-        from botspot.core.dependency_manager import get_dependency_manager
-
-        deps = get_dependency_manager()
-        bot = deps.bot
-
-        file_id = None
-        if has_photo and response.photo:
-            # Get the largest photo
-            file_id = response.photo[-1].file_id
-            file_type = "image/jpeg"
-        elif has_pdf and response.document:
-            file_id = response.document.file_id
-            file_type = "application/pdf"
-        else:
-            await status_msg.edit_text("❌ Не удалось получить файл")
-            return
-
-        if not file_id:
-            await status_msg.edit_text("❌ Не удалось получить файл")
-            return
-
-        # Download the file
-        file = await bot.get_file(file_id)
-        if not file or not file.file_path:
-            await status_msg.edit_text("❌ Не удалось получить путь к файлу")
-            return
-
-        file_bytes = await bot.download_file(file.file_path)
-        if not file_bytes:
+        file_data = await _download_file(file_id)
+        if not file_data:
             await status_msg.edit_text("❌ Не удалось скачать файл")
             return
 
         # Extract payment information directly from the file
-        result = await extract_payment_from_image(file_bytes.read(), file_type)
+        result = await extract_payment_from_image(file_data, file_type)
 
         # Format the response
         if result.is_valid:

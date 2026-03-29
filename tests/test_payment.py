@@ -712,3 +712,176 @@ def test_get_graduate_type_info_graduate():
     result = _get_graduate_type_info(reg)
     assert "2005" in result
     assert "В" in result
+
+
+# ---- Tests for process_payment with pre_uploaded_response ----
+
+
+@pytest.fixture
+def mock_handle_screenshot_upload():
+    with patch(
+        "src.routers.payment._handle_screenshot_upload", new_callable=AsyncMock
+    ) as mock_handle:
+        mock_handle.return_value = True
+        yield mock_handle
+
+
+@pytest.fixture
+def mock_ask_user_choice_raw_msg():
+    """Returns a Message (screenshot) from ask_user_choice_raw."""
+    with patch("src.routers.payment.ask_user_choice_raw") as mock_ask:
+        mock_response = AsyncMock(spec=Message)
+        mock_response.photo = [MagicMock()]
+        mock_response.message_id = 999
+        mock_ask.return_value = mock_response
+        yield mock_ask
+
+
+@pytest.mark.asyncio
+async def test_process_payment_with_pre_uploaded_response(
+    mock_message,
+    mock_state,
+    mock_app,
+    mock_send_safe,
+    mock_handle_screenshot_upload,
+):
+    """When pre_uploaded_response is provided, skip prompt and call _handle_screenshot_upload directly."""
+    from src.app import GraduateType
+    from src.routers.payment import process_payment
+
+    mock_app.collection.find_one.return_value = {
+        "user_id": 12345,
+        "event_id": "aabbccddeeff00112233aabb",
+        "graduate_type": GraduateType.GRADUATE.value,
+    }
+
+    pre_response = AsyncMock(spec=Message)
+    pre_response.photo = [MagicMock()]
+    pre_response.message_id = 777
+
+    result = await process_payment(
+        mock_message,
+        mock_state,
+        "aabbccddeeff00112233aabb",
+        2010,
+        graduate_type=GraduateType.GRADUATE.value,
+        pre_uploaded_response=pre_response,
+    )
+
+    # _handle_screenshot_upload should have been called with the pre_uploaded_response
+    mock_handle_screenshot_upload.assert_called_once()
+    call_args = mock_handle_screenshot_upload.call_args
+    assert call_args[0][1] is pre_response  # second positional arg = response
+    assert result is True
+
+    # save_event_log should be called with auto_payment_proof action
+    mock_app.save_event_log.assert_called_once()
+    log_call = mock_app.save_event_log.call_args
+    assert log_call[0][0] == "payment_action"
+    assert log_call[0][1]["action"] == "auto_payment_proof"
+
+
+@pytest.mark.asyncio
+async def test_process_payment_with_pre_uploaded_response_no_prompt(
+    mock_message,
+    mock_state,
+    mock_app,
+    mock_send_safe,
+    mock_handle_screenshot_upload,
+    mock_ask_user_choice_raw,
+):
+    """When pre_uploaded_response is provided, ask_user_choice_raw should NOT be called."""
+    from src.app import GraduateType
+    from src.routers.payment import process_payment
+
+    mock_app.collection.find_one.return_value = {
+        "user_id": 12345,
+        "event_id": "aabbccddeeff00112233aabb",
+        "graduate_type": GraduateType.GRADUATE.value,
+    }
+
+    pre_response = AsyncMock(spec=Message)
+    pre_response.photo = [MagicMock()]
+    pre_response.message_id = 777
+
+    await process_payment(
+        mock_message,
+        mock_state,
+        "aabbccddeeff00112233aabb",
+        2010,
+        graduate_type=GraduateType.GRADUATE.value,
+        pre_uploaded_response=pre_response,
+    )
+
+    # ask_user_choice_raw should NOT have been called (prompt skipped)
+    mock_ask_user_choice_raw.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_payment_without_pre_uploaded_response_prompts_user(
+    mock_message,
+    mock_state,
+    mock_app,
+    mock_send_safe,
+    mock_handle_screenshot_upload,
+    mock_ask_user_choice_raw_msg,
+):
+    """Without pre_uploaded_response, should prompt user via ask_user_choice_raw and then handle the response."""
+    from src.app import GraduateType
+    from src.routers.payment import process_payment
+
+    mock_app.collection.find_one.return_value = {
+        "user_id": 12345,
+        "event_id": "aabbccddeeff00112233aabb",
+        "graduate_type": GraduateType.GRADUATE.value,
+    }
+
+    result = await process_payment(
+        mock_message,
+        mock_state,
+        "aabbccddeeff00112233aabb",
+        2010,
+        graduate_type=GraduateType.GRADUATE.value,
+        # no pre_uploaded_response
+    )
+
+    # ask_user_choice_raw SHOULD have been called (normal prompt flow)
+    mock_ask_user_choice_raw_msg.assert_called_once()
+
+    # _handle_screenshot_upload should have been called with the response from ask_user_choice_raw
+    mock_handle_screenshot_upload.assert_called_once()
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_process_payment_without_pre_uploaded_pay_later(
+    mock_message,
+    mock_state,
+    mock_app,
+    mock_send_safe,
+    mock_ask_user_choice_raw,
+):
+    """Without pre_uploaded_response, user chooses 'pay_later' -- existing behavior unchanged."""
+    from src.app import GraduateType
+    from src.routers.payment import process_payment
+
+    mock_app.collection.find_one.return_value = {
+        "user_id": 12345,
+        "event_id": "aabbccddeeff00112233aabb",
+        "graduate_type": GraduateType.GRADUATE.value,
+    }
+    mock_ask_user_choice_raw.return_value = "pay_later"
+
+    result = await process_payment(
+        mock_message,
+        mock_state,
+        "aabbccddeeff00112233aabb",
+        2010,
+        graduate_type=GraduateType.GRADUATE.value,
+    )
+
+    # Should return False (no screenshot submitted)
+    assert result is False
+
+    # ask_user_choice_raw SHOULD have been called
+    mock_ask_user_choice_raw.assert_called_once()

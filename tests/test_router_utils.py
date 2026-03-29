@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from src.routers.events import (
+from src.routers._events_helpers import (
     _suggest_event_name,
     _format_pricing,
     _format_event_summary,

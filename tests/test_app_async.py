@@ -1,6 +1,8 @@
 """Tests for async App methods with mocked database."""
 
+import asyncio
 import pytest
+from datetime import datetime
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from src.app import App, RegisteredUser, FeedbackData, GraduateType
@@ -846,3 +848,187 @@ class TestHasProvidedFeedbackWithEventId:
             mock_db.return_value.get_collection.return_value = mock_fb_col
             result = await app.has_provided_feedback(99)
         assert result is False
+
+
+class TestUpdateEventStatusesArchiveLogic:
+    """Tests for the auto-archive logic in _update_event_statuses."""
+
+    @pytest.mark.asyncio
+    async def test_archive_cutoff_is_3_months_ago(self, app):
+        """Verify the archive query uses a date exactly 3 months in the past."""
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+
+        fake_now = datetime(2026, 3, 28, 12, 0, 0)
+        with patch("src.app.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            # relativedelta is imported inside the method, no need to patch it
+            await app._update_event_statuses()
+
+        # First call is the archive call, second is the mark-passed call
+        archive_call = app.events_col.update_many.call_args_list[0]
+        archive_query = archive_call[0][0]
+        archive_update = archive_call[0][1]
+
+        # 3 months before 2026-03-28 is 2025-12-28
+        expected_cutoff = datetime(2025, 12, 28, 12, 0, 0)
+        assert archive_query["date"]["$lt"] == expected_cutoff
+        assert archive_query["status"]["$in"] == [
+            "upcoming",
+            "registration_closed",
+            "passed",
+        ]
+        assert archive_update["$set"]["status"] == "archived"
+        assert archive_update["$set"]["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_mark_passed_query_uses_now(self, app):
+        """Verify the mark-passed query uses 'now' as the cutoff."""
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+
+        fake_now = datetime(2026, 3, 28, 12, 0, 0)
+        with patch("src.app.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            await app._update_event_statuses()
+
+        passed_call = app.events_col.update_many.call_args_list[1]
+        passed_query = passed_call[0][0]
+        passed_update = passed_call[0][1]
+
+        assert passed_query["date"]["$lt"] == fake_now
+        assert passed_query["status"]["$in"] == ["upcoming", "registration_closed"]
+        assert passed_update["$set"]["status"] == "passed"
+
+    @pytest.mark.asyncio
+    async def test_archive_does_not_include_already_archived(self, app):
+        """Archived events should not be re-archived (not in the $in filter)."""
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+
+        await app._update_event_statuses()
+
+        archive_call = app.events_col.update_many.call_args_list[0]
+        statuses_in_filter = archive_call[0][0]["status"]["$in"]
+        assert "archived" not in statuses_in_filter
+
+    @pytest.mark.asyncio
+    async def test_archive_sets_enabled_false(self, app):
+        """Archived events should have enabled set to False."""
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=2))
+
+        await app._update_event_statuses()
+
+        archive_call = app.events_col.update_many.call_args_list[0]
+        archive_update = archive_call[0][1]
+        assert archive_update["$set"]["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_archive_cutoff_end_of_month_rollover(self, app):
+        """Test archive cutoff when current date is Jan 31 (3 months back = Oct 31)."""
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+
+        fake_now = datetime(2026, 1, 31, 10, 0, 0)
+        with patch("src.app.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            await app._update_event_statuses()
+
+        archive_call = app.events_col.update_many.call_args_list[0]
+        cutoff = archive_call[0][0]["date"]["$lt"]
+        # 3 months before Jan 31 is Oct 31
+        assert cutoff == datetime(2025, 10, 31, 10, 0, 0)
+
+
+class TestExportDebounceDetails:
+    """Detailed tests for the debounce export behavior."""
+
+    @pytest.mark.asyncio
+    async def test_force_returns_result_directly(self, app):
+        """force=True should return the exporter result immediately."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(
+            return_value="export_result"
+        )
+        result = await app.export_registered_users_to_google_sheets(
+            event_id="ev1", force=True
+        )
+        assert result == "export_result"
+        app.sheet_exporter.export_registered_users.assert_called_once_with(
+            event_id="ev1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_force_does_not_create_debounce_task(self, app):
+        """force=True should not touch the debounce task."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        await app.export_registered_users_to_google_sheets(force=True)
+        assert app._export_debounce_task is None
+
+    @pytest.mark.asyncio
+    async def test_debounce_creates_task(self, app):
+        """Default (non-force) call should create a debounce task."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        app._export_debounce_seconds = 0.05
+
+        await app.export_registered_users_to_google_sheets(event_id="ev1")
+        assert app._export_debounce_task is not None
+        assert not app._export_debounce_task.done()
+
+        # Wait for debounce to complete
+        await asyncio.sleep(0.1)
+        app.sheet_exporter.export_registered_users.assert_called_once_with(
+            event_id="ev1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_debounce_cancels_previous_task(self, app):
+        """A second debounced call should cancel the first pending task."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        app._export_debounce_seconds = 0.2
+
+        # First call
+        await app.export_registered_users_to_google_sheets(event_id="ev1")
+        first_task = app._export_debounce_task
+
+        # Second call before debounce fires
+        await app.export_registered_users_to_google_sheets(event_id="ev2")
+        second_task = app._export_debounce_task
+
+        assert first_task is not second_task
+        # Let the event loop process the cancellation
+        await asyncio.sleep(0)
+        assert first_task.cancelled()
+
+        # Wait for the second debounce to fire
+        await asyncio.sleep(0.3)
+        # Only the second export should have been called
+        app.sheet_exporter.export_registered_users.assert_called_once_with(
+            event_id="ev2"
+        )
+
+    @pytest.mark.asyncio
+    async def test_debounce_returns_none(self, app):
+        """Default (non-force) call should return None (fire-and-forget)."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        app._export_debounce_seconds = 0.05
+
+        result = await app.export_registered_users_to_google_sheets(event_id="ev1")
+        assert result is None
+
+        # Cleanup
+        await asyncio.sleep(0.1)
+
+    @pytest.mark.asyncio
+    async def test_debounce_handles_export_exception(self, app):
+        """If the delayed export raises, it should be caught (not crash)."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(
+            side_effect=Exception("Sheets API error")
+        )
+        app._export_debounce_seconds = 0.05
+
+        await app.export_registered_users_to_google_sheets(event_id="ev1")
+        # Wait for debounce to fire — should not raise
+        await asyncio.sleep(0.1)
+        assert app._export_debounce_task.done()
