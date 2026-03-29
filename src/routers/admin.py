@@ -60,7 +60,7 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
             "Управление:",
             choices={
                 "manage_events": "Управление встречами",
-                "register_payment": "Отметить оплату",
+                "register_payment": "Зарегистрировать оплату (за другого участника)",
                 "export": "Экспортировать данные",
             },
             state=state,
