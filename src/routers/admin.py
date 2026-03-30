@@ -193,9 +193,7 @@ async def _select_unpaid_user(
         return await _resolve_manual_user(chat_id, state, app, event_id)
 
     # Find from unpaid list
-    reg = next(
-        (u for u in unpaid_users if str(u.get("user_id")) == chosen_user), None
-    )
+    reg = next((u for u in unpaid_users if str(u.get("user_id")) == chosen_user), None)
     if not reg:
         await send_safe(chat_id, "Ошибка: пользователь не найден.")
         return None

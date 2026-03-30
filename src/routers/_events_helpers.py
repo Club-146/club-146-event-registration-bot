@@ -917,9 +917,7 @@ async def _handle_archive_selection(
     archive_choices: dict[str, str] = {}
     for ev in archived_events[:20]:
         eid = str(ev["_id"])
-        archive_choices[eid] = (
-            f"{ev.get('city', '?')} ({get_event_date_display(ev)})"
-        )
+        archive_choices[eid] = f"{ev.get('city', '?')} ({get_event_date_display(ev)})"
     archive_choices["back"] = "Назад"
 
     arch_selection = await ask_user_choice(

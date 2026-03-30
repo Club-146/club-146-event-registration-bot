@@ -565,9 +565,7 @@ async def test_show_past_events_history_with_events(
 
     mock_app = MagicMock()
     mock_app.get_all_events = AsyncMock(return_value=all_events)
-    mock_app.get_user_registrations = AsyncMock(
-        return_value=[{"event_id": "ev1"}]
-    )
+    mock_app.get_user_registrations = AsyncMock(return_value=[{"event_id": "ev1"}])
     mock_app.get_registration_count_for_event = AsyncMock(side_effect=[42, 15])
 
     await _show_past_events_history(mock_message, mock_app, 12345)
@@ -655,9 +653,7 @@ async def test_handle_registered_user_only_past_shows_history(
     mock_app.is_event_passed = MagicMock(return_value=True)
     # Mocks for _show_past_events_history
     mock_app.get_all_events = AsyncMock(return_value=[past_event])
-    mock_app.get_user_registrations = AsyncMock(
-        return_value=[{"event_id": "ev1"}]
-    )
+    mock_app.get_user_registrations = AsyncMock(return_value=[{"event_id": "ev1"}])
     mock_app.get_registration_count_for_event = AsyncMock(return_value=30)
 
     await handle_registered_user(mock_message, mock_state, past_reg, mock_app)
@@ -695,7 +691,9 @@ async def test_handle_registered_user_future_reg_goes_to_single(
     mock_app.get_event_for_registration = AsyncMock(return_value=future_event)
     mock_app.is_event_passed = MagicMock(return_value=False)
 
-    with patch("src.router._handle_single_registration", new_callable=AsyncMock) as mock_single:
+    with patch(
+        "src.router._handle_single_registration", new_callable=AsyncMock
+    ) as mock_single:
         await handle_registered_user(mock_message, mock_state, future_reg, mock_app)
         mock_single.assert_called_once()
 
@@ -722,7 +720,9 @@ async def test_handle_registered_user_multiple_future_regs_goes_to_multi(
     mock_app.get_event_for_registration = AsyncMock(return_value=future_event)
     mock_app.is_event_passed = MagicMock(return_value=False)
 
-    with patch("src.router._handle_multi_registrations", new_callable=AsyncMock) as mock_multi:
+    with patch(
+        "src.router._handle_multi_registrations", new_callable=AsyncMock
+    ) as mock_multi:
         await handle_registered_user(mock_message, mock_state, future_reg1, mock_app)
         mock_multi.assert_called_once()
 
@@ -737,8 +737,16 @@ async def test_handle_registered_user_mixed_past_and_future(
     past_reg = {"target_city": "Москва", "event_id": "ev1"}
     future_reg = {"target_city": "Пермь", "event_id": "ev2"}
 
-    past_event = {"date": datetime(2020, 1, 1), "city": "Москва", "date_display": "1 Января"}
-    future_event = {"date": datetime(2099, 6, 15), "city": "Пермь", "date_display": "15 Июня"}
+    past_event = {
+        "date": datetime(2020, 1, 1),
+        "city": "Москва",
+        "date_display": "1 Января",
+    }
+    future_event = {
+        "date": datetime(2099, 6, 15),
+        "city": "Пермь",
+        "date_display": "15 Июня",
+    }
 
     mock_app = MagicMock()
     mock_app.get_user_active_registrations = AsyncMock(
@@ -755,7 +763,9 @@ async def test_handle_registered_user_mixed_past_and_future(
         side_effect=lambda e: e["date"] < datetime.now()
     )
 
-    with patch("src.router._handle_single_registration", new_callable=AsyncMock) as mock_single:
+    with patch(
+        "src.router._handle_single_registration", new_callable=AsyncMock
+    ) as mock_single:
         await handle_registered_user(mock_message, mock_state, future_reg, mock_app)
         mock_single.assert_called_once()
         # Verify only the future registration was passed
@@ -854,9 +864,7 @@ class TestShowPastEventsHistory:
                 },
             ]
         )
-        mock_app.get_user_registrations = AsyncMock(
-            return_value=[{"event_id": "e1"}]
-        )
+        mock_app.get_user_registrations = AsyncMock(return_value=[{"event_id": "e1"}])
         mock_app.get_registration_count_for_event = AsyncMock(return_value=42)
 
         await _show_past_events_history(mock_message, mock_app, 12345)
@@ -892,9 +900,7 @@ class TestHandleRegisteredUserSplit:
         mock_app.get_event_for_registration = AsyncMock(return_value=past_event)
         mock_app.is_event_passed = MagicMock(return_value=True)
         mock_app.get_all_events = AsyncMock(return_value=[past_event])
-        mock_app.get_user_registrations = AsyncMock(
-            return_value=[{"event_id": "e1"}]
-        )
+        mock_app.get_user_registrations = AsyncMock(return_value=[{"event_id": "e1"}])
         mock_app.get_registration_count_for_event = AsyncMock(return_value=10)
 
         await handle_registered_user(mock_message, mock_state, past_reg, mock_app)
