@@ -1,9 +1,11 @@
 """Tests for async App methods with mocked database."""
 
+import asyncio
 import pytest
+from datetime import datetime
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from src.app import App, RegisteredUser, FeedbackData
+from src.app import App, RegisteredUser, FeedbackData, GraduateType
 
 
 @pytest.fixture
@@ -519,3 +521,514 @@ class TestMoveUserToDeleted:
 
         result = await app.move_user_to_deleted(123)
         assert result is False
+
+
+class TestStartup:
+    @pytest.mark.asyncio
+    async def test_startup_no_fixes(self, app):
+        """Test startup when _fix_database returns total_fixed == 0."""
+        # _update_event_statuses
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+        # _fix_database internals
+        mock_events_cursor = MagicMock()
+        mock_events_cursor.sort = MagicMock(return_value=mock_events_cursor)
+        mock_events_cursor.to_list = AsyncMock(return_value=[])
+        app.events_col.find = MagicMock(return_value=mock_events_cursor)
+        app.collection.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+
+        with patch("src.migrations.run_migrations", AsyncMock(return_value=None)):
+            await app.startup()
+
+    @pytest.mark.asyncio
+    async def test_startup_with_fixes(self, app):
+        """Test startup when _fix_database returns total_fixed > 0 (exercises lines 166-172)."""
+        from bson import ObjectId
+
+        mock_events = [
+            {"_id": ObjectId(), "pricing_type": "free", "free_for_types": []},
+        ]
+        mock_events_cursor = MagicMock()
+        mock_events_cursor.sort = MagicMock(return_value=mock_events_cursor)
+        mock_events_cursor.to_list = AsyncMock(return_value=mock_events)
+        app.events_col.find = MagicMock(return_value=mock_events_cursor)
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+        app.collection.update_many = AsyncMock(return_value=MagicMock(modified_count=1))
+        app.event_logs.insert_one = AsyncMock()
+
+        with patch("src.migrations.run_migrations", AsyncMock(return_value=None)):
+            await app.startup()
+
+
+class TestUpdateEventStatuses:
+    @pytest.mark.asyncio
+    async def test_no_modified(self, app):
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+        await app._update_event_statuses()
+        # Called twice: auto-archive (>3 months) + mark passed
+        assert app.events_col.update_many.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_some_modified(self, app):
+        """Exercises modified_count > 0 -> logger.info."""
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=3))
+        await app._update_event_statuses()
+        assert app.events_col.update_many.call_count == 2
+
+
+class TestGetUserActiveRegistrations:
+    @pytest.mark.asyncio
+    async def test_filters_archived(self, app):
+        """Exercises lines 394-400: archived events are excluded."""
+        mock_cursor = MagicMock()
+        mock_cursor.to_list = AsyncMock(
+            return_value=[
+                {"user_id": 1, "event_id": "507f1f77bcf86cd799439011"},
+                {"user_id": 1, "event_id": "507f1f77bcf86cd799439012"},
+            ]
+        )
+        app.collection.find = MagicMock(return_value=mock_cursor)
+
+        call_count = 0
+
+        async def mock_find_one(query):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {"city": "Москва", "status": "upcoming"}
+            return {"city": "Пермь", "status": "archived"}
+
+        app.events_col.find_one = mock_find_one
+
+        result = await app.get_user_active_registrations(1)
+        assert len(result) == 1
+
+
+class TestGetAllEventsEmpty:
+    @pytest.mark.asyncio
+    async def test_empty_list(self, app):
+        """Line 240: get_all_events with empty result."""
+        mock_cursor = MagicMock()
+        mock_cursor.sort = MagicMock(return_value=mock_cursor)
+        mock_cursor.to_list = AsyncMock(return_value=[])
+        app.events_col.find = MagicMock(return_value=mock_cursor)
+
+        result = await app.get_all_events()
+        assert result == []
+
+
+class TestGetEventByCityAndDate:
+    @pytest.mark.asyncio
+    async def test_found(self, app):
+        """Line 240: get_event_by_city_and_date."""
+        from datetime import datetime
+
+        app.events_col.find_one = AsyncMock(return_value={"city": "Москва"})
+        dt = datetime(2025, 6, 15)
+        result = await app.get_event_by_city_and_date("Москва", dt)
+        assert result is not None
+        app.events_col.find_one.assert_called_once_with({"city": "Москва", "date": dt})
+
+    @pytest.mark.asyncio
+    async def test_not_found(self, app):
+        from datetime import datetime
+
+        app.events_col.find_one = AsyncMock(return_value=None)
+        result = await app.get_event_by_city_and_date("Тбилиси", datetime(2025, 1, 1))
+        assert result is None
+
+
+class TestLogToChatException:
+    @pytest.mark.asyncio
+    @patch("src.app.send_safe", side_effect=Exception("network error"))
+    async def test_exception_returns_none(self, mock_send, app):
+        """Lines 696-698: exception in send_safe returns None."""
+        app.settings.logs_chat_id = 99999
+        result = await app.log_to_chat("test message", "logs")
+        assert result is None
+
+
+class TestLogRegistrationCompletedBranches:
+    @pytest.mark.asyncio
+    @patch("src.app.send_safe")
+    async def test_teacher_status(self, mock_send, app):
+        """Lines 752, 764: teacher branch in log_registration_completed."""
+        mock_send.return_value = MagicMock()
+        app.settings.events_chat_id = 111
+        await app.log_registration_completed(
+            user_id=1,
+            username="u",
+            full_name="Иванов Иван",
+            graduation_year=2000,
+            class_letter="А",
+            city="Москва",
+            graduate_type=GraduateType.TEACHER.value,
+        )
+        mock_send.assert_called_once()
+        msg = mock_send.call_args[0][1]
+        assert "Учитель" in msg
+        assert "Бесплатно (учитель)" in msg
+
+    @pytest.mark.asyncio
+    @patch("src.app.send_safe")
+    async def test_non_graduate_status(self, mock_send, app):
+        """Line 754: non-graduate branch."""
+        mock_send.return_value = MagicMock()
+        app.settings.events_chat_id = 111
+        await app.log_registration_completed(
+            user_id=1,
+            username="u",
+            full_name="Смит Джон",
+            graduation_year=2000,
+            class_letter="А",
+            city="Москва",
+            graduate_type=GraduateType.NON_GRADUATE.value,
+        )
+        msg = mock_send.call_args[0][1]
+        assert "Не выпускник" in msg
+
+    @pytest.mark.asyncio
+    @patch("src.app.send_safe")
+    async def test_organizer_status(self, mock_send, app):
+        """Lines 756, 766: organizer branch."""
+        mock_send.return_value = MagicMock()
+        app.settings.events_chat_id = 111
+        await app.log_registration_completed(
+            user_id=1,
+            username="u",
+            full_name="Организатор Один",
+            graduation_year=2000,
+            class_letter="А",
+            city="Москва",
+            graduate_type=GraduateType.ORGANIZER.value,
+        )
+        msg = mock_send.call_args[0][1]
+        assert "Организатор" in msg
+        assert "Бесплатно (организатор)" in msg
+
+    @pytest.mark.asyncio
+    @patch("src.app.send_safe")
+    async def test_belgrade_payment(self, mock_send, app):
+        """Line 768: Белград payment branch."""
+        mock_send.return_value = MagicMock()
+        app.settings.events_chat_id = 111
+        await app.log_registration_completed(
+            user_id=1,
+            username="u",
+            full_name="Иванов Иван",
+            graduation_year=2000,
+            class_letter="А",
+            city="Белград",
+            graduate_type=GraduateType.GRADUATE.value,
+        )
+        msg = mock_send.call_args[0][1]
+        assert "Белград" in msg
+
+    @pytest.mark.asyncio
+    @patch("src.app.send_safe")
+    async def test_with_guests(self, mock_send, app):
+        """Lines 771-773: guests block."""
+        mock_send.return_value = MagicMock()
+        app.settings.events_chat_id = 111
+        guests = [{"name": "Гость А", "price": 2000}]
+        await app.log_registration_completed(
+            user_id=1,
+            username="u",
+            full_name="Иванов Иван",
+            graduation_year=2000,
+            class_letter="А",
+            city="Москва",
+            graduate_type=GraduateType.GRADUATE.value,
+            guests=guests,
+        )
+        msg = mock_send.call_args[0][1]
+        assert "Гости" in msg
+        assert "Гость А" in msg
+
+
+class TestLogRegistrationCanceledNoCity:
+    @pytest.mark.asyncio
+    @patch("src.app.send_safe")
+    async def test_no_city(self, mock_send, app):
+        """Line 799: no city -> 'Все города'."""
+        mock_send.return_value = MagicMock()
+        app.settings.events_chat_id = 222
+        await app.log_registration_canceled(
+            user_id=1, username="u", full_name="Иванов Иван", city=None
+        )
+        msg = mock_send.call_args[0][1]
+        assert "Все города" in msg
+
+
+class TestGetUsersWithAndWithoutFeedback:
+    @pytest.mark.asyncio
+    async def test_get_users_without_feedback(self, app):
+        """Lines 1039-1046: get_users_without_feedback."""
+        mock_cursor = MagicMock()
+        mock_cursor.to_list = AsyncMock(
+            return_value=[
+                {"user_id": 1, "target_city": "Москва"},
+                {"user_id": 2, "target_city": "Пермь"},
+            ]
+        )
+        app.collection.find = MagicMock(return_value=mock_cursor)
+
+        # user 1 has feedback, user 2 does not
+        mock_fb_col = AsyncMock()
+
+        async def find_one_fb(query):
+            if query["user_id"] == 1:
+                return {"user_id": 1}
+            return None
+
+        mock_fb_col.find_one = find_one_fb
+        app._feedback_collection = mock_fb_col
+
+        result = await app.get_users_without_feedback()
+        assert len(result) == 1
+        assert result[0]["user_id"] == 2
+
+    @pytest.mark.asyncio
+    async def test_get_users_with_feedback(self, app):
+        """Lines 1052-1059: get_users_with_feedback."""
+        mock_cursor = MagicMock()
+        mock_cursor.to_list = AsyncMock(
+            return_value=[
+                {"user_id": 1, "target_city": "Москва"},
+                {"user_id": 2, "target_city": "Пермь"},
+            ]
+        )
+        app.collection.find = MagicMock(return_value=mock_cursor)
+
+        mock_fb_col = AsyncMock()
+
+        async def find_one_fb(query):
+            if query["user_id"] == 1:
+                return {"user_id": 1}
+            return None
+
+        mock_fb_col.find_one = find_one_fb
+        app._feedback_collection = mock_fb_col
+
+        result = await app.get_users_with_feedback()
+        assert len(result) == 1
+        assert result[0]["user_id"] == 1
+
+
+class TestHasProvidedFeedbackWithEventId:
+    @pytest.mark.asyncio
+    async def test_with_event_id_found(self, app):
+        """Lines 1283-1290: has_provided_feedback with event_id."""
+        mock_fb_col = AsyncMock()
+        mock_fb_col.find_one = AsyncMock(return_value={"user_id": 1, "event_id": "e1"})
+        app._feedback_collection = mock_fb_col
+
+        result = await app.has_provided_feedback(1, event_id="e1")
+        assert result is True
+        mock_fb_col.find_one.assert_called_once_with({"user_id": 1, "event_id": "e1"})
+
+    @pytest.mark.asyncio
+    async def test_with_event_id_not_found(self, app):
+        mock_fb_col = AsyncMock()
+        mock_fb_col.find_one = AsyncMock(return_value=None)
+        app._feedback_collection = mock_fb_col
+
+        result = await app.has_provided_feedback(1, event_id="e2")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_without_event_id_initializes_collection(self, app):
+        """Tests that _feedback_collection is initialized when not set."""
+        if hasattr(app, "_feedback_collection"):
+            del app._feedback_collection
+
+        mock_fb_col = AsyncMock()
+        mock_fb_col.find_one = AsyncMock(return_value=None)
+
+        with patch("src.app.get_database") as mock_db:
+            mock_db.return_value.get_collection.return_value = mock_fb_col
+            result = await app.has_provided_feedback(99)
+        assert result is False
+
+
+class TestUpdateEventStatusesArchiveLogic:
+    """Tests for the auto-archive logic in _update_event_statuses."""
+
+    @pytest.mark.asyncio
+    async def test_archive_cutoff_is_3_months_ago(self, app):
+        """Verify the archive query uses a date exactly 3 months in the past."""
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+
+        fake_now = datetime(2026, 3, 28, 12, 0, 0)
+        with patch("src.app.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            # relativedelta is imported inside the method, no need to patch it
+            await app._update_event_statuses()
+
+        # First call is the archive call, second is the mark-passed call
+        archive_call = app.events_col.update_many.call_args_list[0]
+        archive_query = archive_call[0][0]
+        archive_update = archive_call[0][1]
+
+        # 3 months before 2026-03-28 is 2025-12-28
+        expected_cutoff = datetime(2025, 12, 28, 12, 0, 0)
+        assert archive_query["date"]["$lt"] == expected_cutoff
+        assert archive_query["status"]["$in"] == [
+            "upcoming",
+            "registration_closed",
+            "passed",
+        ]
+        assert archive_update["$set"]["status"] == "archived"
+        assert archive_update["$set"]["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_mark_passed_query_uses_now(self, app):
+        """Verify the mark-passed query uses 'now' as the cutoff."""
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+
+        fake_now = datetime(2026, 3, 28, 12, 0, 0)
+        with patch("src.app.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            await app._update_event_statuses()
+
+        passed_call = app.events_col.update_many.call_args_list[1]
+        passed_query = passed_call[0][0]
+        passed_update = passed_call[0][1]
+
+        assert passed_query["date"]["$lt"] == fake_now
+        assert passed_query["status"]["$in"] == ["upcoming", "registration_closed"]
+        assert passed_update["$set"]["status"] == "passed"
+
+    @pytest.mark.asyncio
+    async def test_archive_does_not_include_already_archived(self, app):
+        """Archived events should not be re-archived (not in the $in filter)."""
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+
+        await app._update_event_statuses()
+
+        archive_call = app.events_col.update_many.call_args_list[0]
+        statuses_in_filter = archive_call[0][0]["status"]["$in"]
+        assert "archived" not in statuses_in_filter
+
+    @pytest.mark.asyncio
+    async def test_archive_sets_enabled_false(self, app):
+        """Archived events should have enabled set to False."""
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=2))
+
+        await app._update_event_statuses()
+
+        archive_call = app.events_col.update_many.call_args_list[0]
+        archive_update = archive_call[0][1]
+        assert archive_update["$set"]["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_archive_cutoff_end_of_month_rollover(self, app):
+        """Test archive cutoff when current date is Jan 31 (3 months back = Oct 31)."""
+        app.events_col.update_many = AsyncMock(return_value=MagicMock(modified_count=0))
+
+        fake_now = datetime(2026, 1, 31, 10, 0, 0)
+        with patch("src.app.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            await app._update_event_statuses()
+
+        archive_call = app.events_col.update_many.call_args_list[0]
+        cutoff = archive_call[0][0]["date"]["$lt"]
+        # 3 months before Jan 31 is Oct 31
+        assert cutoff == datetime(2025, 10, 31, 10, 0, 0)
+
+
+class TestExportDebounceDetails:
+    """Detailed tests for the debounce export behavior."""
+
+    @pytest.mark.asyncio
+    async def test_force_returns_result_directly(self, app):
+        """force=True should return the exporter result immediately."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(
+            return_value="export_result"
+        )
+        result = await app.export_registered_users_to_google_sheets(
+            event_id="ev1", force=True
+        )
+        assert result == "export_result"
+        app.sheet_exporter.export_registered_users.assert_called_once_with(
+            event_id="ev1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_force_does_not_create_debounce_task(self, app):
+        """force=True should not touch the debounce task."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        await app.export_registered_users_to_google_sheets(force=True)
+        assert app._export_debounce_task is None
+
+    @pytest.mark.asyncio
+    async def test_debounce_creates_task(self, app):
+        """Default (non-force) call should create a debounce task."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        app._export_debounce_seconds = 0.05
+
+        await app.export_registered_users_to_google_sheets(event_id="ev1")
+        assert app._export_debounce_task is not None
+        assert not app._export_debounce_task.done()
+
+        # Wait for debounce to complete
+        await asyncio.sleep(0.1)
+        app.sheet_exporter.export_registered_users.assert_called_once_with(
+            event_id="ev1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_debounce_cancels_previous_task(self, app):
+        """A second debounced call should cancel the first pending task."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        app._export_debounce_seconds = 0.2
+
+        # First call
+        await app.export_registered_users_to_google_sheets(event_id="ev1")
+        first_task = app._export_debounce_task
+
+        # Second call before debounce fires
+        await app.export_registered_users_to_google_sheets(event_id="ev2")
+        second_task = app._export_debounce_task
+
+        assert first_task is not second_task
+        # Let the event loop process the cancellation
+        await asyncio.sleep(0)
+        assert first_task.cancelled()
+
+        # Wait for the second debounce to fire
+        await asyncio.sleep(0.3)
+        # Only the second export should have been called
+        app.sheet_exporter.export_registered_users.assert_called_once_with(
+            event_id="ev2"
+        )
+
+    @pytest.mark.asyncio
+    async def test_debounce_returns_none(self, app):
+        """Default (non-force) call should return None (fire-and-forget)."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        app._export_debounce_seconds = 0.05
+
+        result = await app.export_registered_users_to_google_sheets(event_id="ev1")
+        assert result is None
+
+        # Cleanup
+        await asyncio.sleep(0.1)
+
+    @pytest.mark.asyncio
+    async def test_debounce_handles_export_exception(self, app):
+        """If the delayed export raises, it should be caught (not crash)."""
+        app.sheet_exporter = MagicMock()
+        app.sheet_exporter.export_registered_users = AsyncMock(
+            side_effect=Exception("Sheets API error")
+        )
+        app._export_debounce_seconds = 0.05
+
+        await app.export_registered_users_to_google_sheets(event_id="ev1")
+        # Wait for debounce to fire — should not raise
+        await asyncio.sleep(0.1)
+        assert app._export_debounce_task.done()

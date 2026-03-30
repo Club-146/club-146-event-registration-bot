@@ -1,3 +1,4 @@
+import asyncio
 import re
 from aiogram.types import Message
 from datetime import datetime
@@ -142,6 +143,8 @@ class App:
         self._event_logs = None
         self._deleted_users = None
         self._events_col = None
+        self._export_debounce_task: asyncio.Task | None = None
+        self._export_debounce_seconds = 30
 
     async def startup(self):
         """Run startup tasks like fixing the database and initializing collections."""
@@ -167,9 +170,8 @@ class App:
             logger.info(
                 f"Database fix applied to {fix_results['total_fixed']} records:"
             )
-            logger.info(f"- SPb: {fix_results['spb_fixed']}")
-            logger.info(f"- Belgrade: {fix_results['belgrade_fixed']}")
-            logger.info(f"- Teachers: {fix_results['teachers_fixed']}")
+            logger.info(f"- Free events: {fix_results['free_events_fixed']}")
+            logger.info(f"- Free types: {fix_results['free_types_fixed']}")
 
     @property
     def collection(self):
@@ -377,8 +379,26 @@ class App:
         return regular_price, discounted_price
 
     async def _update_event_statuses(self):
-        """Mark events as 'passed' if their date is in the past."""
+        """Mark events as 'passed' if date is in the past, 'archived' if older than 3 months."""
         now = datetime.now()
+
+        # Auto-archive events older than 3 months
+        from dateutil.relativedelta import relativedelta
+
+        archive_cutoff = now - relativedelta(months=3)
+        archived = await self.events_col.update_many(
+            {
+                "date": {"$lt": archive_cutoff},
+                "status": {"$in": ["upcoming", "registration_closed", "passed"]},
+            },
+            {"$set": {"status": "archived", "enabled": False, "updated_at": now}},
+        )
+        if archived.modified_count > 0:
+            logger.info(
+                f"Auto-archived {archived.modified_count} events older than 3 months."
+            )
+
+        # Mark recent past events as 'passed'
         result = await self.events_col.update_many(
             {
                 "date": {"$lt": now},
@@ -650,8 +670,29 @@ class App:
                 "Неверный формат. Пожалуйста, введите год выпуска и букву класса (например, '2003 Б').",
             )
 
-    def export_registered_users_to_google_sheets(self, event_id: Optional[str] = None):
-        return self.sheet_exporter.export_registered_users(event_id=event_id)
+    async def export_registered_users_to_google_sheets(
+        self, event_id: Optional[str] = None, force: bool = False
+    ):
+        """Export to Google Sheets. Debounced by default (30s) to avoid rate limits.
+
+        Use force=True for explicit admin exports that need immediate results.
+        """
+        if force:
+            return await self.sheet_exporter.export_registered_users(event_id=event_id)
+
+        if self._export_debounce_task and not self._export_debounce_task.done():
+            self._export_debounce_task.cancel()
+            logger.debug("Export debounce reset — new edit arrived")
+
+        async def _delayed_export():
+            await asyncio.sleep(self._export_debounce_seconds)
+            logger.info("Debounce timer elapsed, exporting to Google Sheets")
+            try:
+                await self.sheet_exporter.export_registered_users(event_id=event_id)
+            except Exception as e:
+                logger.error(f"Google Sheets export failed: {e}")
+
+        self._export_debounce_task = asyncio.create_task(_delayed_export())
 
     async def export_to_csv(self, event_id: Optional[str] = None):
         """Export registered users to CSV"""

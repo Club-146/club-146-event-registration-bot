@@ -1,5 +1,7 @@
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch as mock_patch
+from datetime import datetime
 
 from src.app import App, GraduateType
 
@@ -235,3 +237,167 @@ class TestApp:
         assert "test_user" in message
         assert "Иванов Иван" in message
         assert "Москва" in message
+
+
+class TestValidateGraduationYear:
+    """Tests for validate_graduation_year covering edge-case branches."""
+
+    def setup_method(self):
+        mock_db = MagicMock()
+        mock_db.get_collection.return_value = AsyncMock()
+        self.db_patcher = patch("src.app.get_database", return_value=mock_db)
+        self.db_patcher.start()
+        self.app = App(
+            telegram_bot_token="tok",
+            spreadsheet_id="sid",
+            payment_phone_number="1",
+            payment_name="N",
+        )
+
+    def teardown_method(self):
+        self.db_patcher.stop()
+
+    def test_current_year_june_or_later(self):
+        current_year = datetime.now().year
+        with mock_patch("src.app.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(current_year, 6, 15)
+            valid, msg = self.app.validate_graduation_year(current_year)
+        assert valid is True
+
+    def test_current_year_before_june(self):
+        current_year = datetime.now().year
+        with mock_patch("src.app.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(current_year, 3, 1)
+            valid, msg = self.app.validate_graduation_year(current_year)
+        assert valid is False
+        assert "после выпуска" in msg
+
+    def test_future_year_too_far(self):
+        current_year = datetime.now().year
+        valid, msg = self.app.validate_graduation_year(current_year + 10)
+        assert valid is False
+        assert "позже" in msg
+
+
+class TestParseGraduationYearCoverage:
+    """Covers uncovered branches in parse_graduation_year_and_class_letter."""
+
+    def setup_method(self):
+        mock_db = MagicMock()
+        mock_db.get_collection.return_value = AsyncMock()
+        self.db_patcher = patch("src.app.get_database", return_value=mock_db)
+        self.db_patcher.start()
+        self.app = App(
+            telegram_bot_token="tok",
+            spreadsheet_id="sid",
+            payment_phone_number="1",
+            payment_name="N",
+        )
+
+    def teardown_method(self):
+        self.db_patcher.stop()
+
+    def test_digit_only_invalid_year(self):
+        # year only, but year is invalid (too early) -> returns None, None, error
+        year, letter, err = self.app.parse_graduation_year_and_class_letter("1980")
+        assert year is None
+        assert letter is None
+        assert err is not None
+
+    def test_case3_fallback_split(self):
+        # Input like "03 Б" - len < 4, so goes to case 3 fallback (maxsplit=1)
+        year, letter, err = self.app.parse_graduation_year_and_class_letter("2003 Б")
+        assert year == 2003
+        assert letter == "Б"
+        assert err is None
+
+
+class TestExportPassThrough:
+    """Tests for export pass-through methods (lines 654, 658, 662, 666, 670)."""
+
+    def setup_method(self):
+        mock_db = MagicMock()
+        mock_db.get_collection.return_value = AsyncMock()
+        self.db_patcher = patch("src.app.get_database", return_value=mock_db)
+        self.db_patcher.start()
+        self.app = App(
+            telegram_bot_token="tok",
+            spreadsheet_id="sid",
+            payment_phone_number="1",
+            payment_name="N",
+        )
+
+    def teardown_method(self):
+        self.db_patcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_export_registered_users_to_google_sheets_force(self):
+        self.app.sheet_exporter = MagicMock()
+        self.app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        result = await self.app.export_registered_users_to_google_sheets(
+            event_id="abc", force=True
+        )
+        self.app.sheet_exporter.export_registered_users.assert_called_once_with(
+            event_id="abc"
+        )
+        assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_export_registered_users_to_google_sheets_debounced(self):
+        self.app.sheet_exporter = MagicMock()
+        self.app.sheet_exporter.export_registered_users = AsyncMock(return_value="ok")
+        self.app._export_debounce_seconds = 0.1
+        await self.app.export_registered_users_to_google_sheets(event_id="abc")
+        # Should not have been called yet (debounce pending)
+        self.app.sheet_exporter.export_registered_users.assert_not_called()
+        # Wait for debounce to fire
+        import asyncio
+
+        await asyncio.sleep(0.2)
+        self.app.sheet_exporter.export_registered_users.assert_called_once_with(
+            event_id="abc"
+        )
+
+    @pytest.mark.asyncio
+    async def test_export_to_csv(self):
+        self.app.sheet_exporter = MagicMock()
+        self.app.sheet_exporter.export_to_csv = AsyncMock(return_value="csv_data")
+        result = await self.app.export_to_csv(event_id="abc")
+        self.app.sheet_exporter.export_to_csv.assert_called_once_with(event_id="abc")
+        assert result == "csv_data"
+
+    @pytest.mark.asyncio
+    async def test_export_deleted_users_to_csv(self):
+        self.app.sheet_exporter = MagicMock()
+        self.app.sheet_exporter.export_deleted_users_to_csv = AsyncMock(
+            return_value="del_csv"
+        )
+        result = await self.app.export_deleted_users_to_csv(event_id="abc")
+        self.app.sheet_exporter.export_deleted_users_to_csv.assert_called_once_with(
+            event_id="abc"
+        )
+        assert result == "del_csv"
+
+    @pytest.mark.asyncio
+    async def test_export_feedback_to_sheets(self):
+        self.app.sheet_exporter = MagicMock()
+        self.app.sheet_exporter.export_feedback_to_sheets = AsyncMock(
+            return_value="sheets_data"
+        )
+        result = await self.app.export_feedback_to_sheets(event_id="xyz")
+        self.app.sheet_exporter.export_feedback_to_sheets.assert_called_once_with(
+            event_id="xyz"
+        )
+        assert result == "sheets_data"
+
+    @pytest.mark.asyncio
+    async def test_export_feedback_to_csv(self):
+        self.app.sheet_exporter = MagicMock()
+        self.app.sheet_exporter.export_feedback_to_csv = AsyncMock(
+            return_value="fb_csv"
+        )
+        result = await self.app.export_feedback_to_csv(event_id="xyz")
+        self.app.sheet_exporter.export_feedback_to_csv.assert_called_once_with(
+            event_id="xyz"
+        )
+        assert result == "fb_csv"

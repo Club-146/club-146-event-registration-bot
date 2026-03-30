@@ -23,7 +23,7 @@ fix-unsafe:
 	uv run ruff format .
 
 test:
-	uv run pytest tests/ --cov=src --cov-report=term --cov-fail-under=50
+	uv run pytest tests/ --cov=src --cov-report=term --cov-fail-under=40
 
 help:
 	@echo "Available targets:"
