@@ -17,7 +17,7 @@ def _registration_find(registrations):
             event_filter = condition.get("event_id")
             if isinstance(event_filter, dict) and "$in" in event_filter:
                 event_ids = set(event_filter["$in"])
-            elif event_filter is not None:
+            elif isinstance(event_filter, (str, int)):
                 event_ids = {event_filter}
 
         assert event_ids is not None
