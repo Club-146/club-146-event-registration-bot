@@ -1036,16 +1036,18 @@ class App:
         self,
         payment_status: Optional[str] = None,
         event_id: Optional[str] = None,
+        active_only: bool = False,
     ) -> List[Dict]:
         """
         Base method to get users with various filters.
 
         Args:
             payment_status: Filter by payment status ("confirmed", "pending", "declined", None for any)
-            event_id: Filter by event_id or None for all
+            event_id: Filter by one event, or None/"all" for no event filter
+            active_only: Limit an unscoped query to active events
 
         Returns:
-            List of user registrations matching the criteria
+            One registration per Telegram user matching the criteria
         """
         query = {}
 
@@ -1061,17 +1063,39 @@ class App:
         # Filter by event_id
         if event_id and event_id != "all":
             and_conditions.append({"event_id": event_id})
+        elif active_only:
+            active_events = await self.get_active_events()
+            active_event_ids = [str(event["_id"]) for event in active_events]
+            and_conditions.append({"event_id": {"$in": active_event_ids}})
 
         # Add the conditions to the query if we have any
         if and_conditions:
             query["$and"] = and_conditions
 
         cursor = self.collection.find(query)
-        return await cursor.to_list(length=None)
+        registrations = await cursor.to_list(length=None)
 
-    async def get_unpaid_users(self, event_id: Optional[str] = None) -> List[Dict]:
+        # A user can have registrations for multiple current events. CRM broadcasts
+        # still address the Telegram account only once.
+        unique_users = []
+        seen_user_ids = set()
+        for registration in registrations:
+            user_id = registration.get("user_id")
+            if user_id is not None:
+                if user_id in seen_user_ids:
+                    continue
+                seen_user_ids.add(user_id)
+            unique_users.append(registration)
+
+        return unique_users
+
+    async def get_unpaid_users(
+        self, event_id: Optional[str] = None, active_only: bool = False
+    ) -> List[Dict]:
         """Get all users who have not paid yet (payment_status is not "confirmed")"""
-        return await self._get_users_base(payment_status="unpaid", event_id=event_id)
+        return await self._get_users_base(
+            payment_status="unpaid", event_id=event_id, active_only=active_only
+        )
 
     async def get_users_without_feedback(
         self, event_id: Optional[str] = None
@@ -1099,13 +1123,19 @@ class App:
 
         return users_with_feedback
 
-    async def get_paid_users(self, event_id: Optional[str] = None) -> List[Dict]:
+    async def get_paid_users(
+        self, event_id: Optional[str] = None, active_only: bool = False
+    ) -> List[Dict]:
         """Get all users who have paid (payment_status is "confirmed")."""
-        return await self._get_users_base(payment_status="paid", event_id=event_id)
+        return await self._get_users_base(
+            payment_status="paid", event_id=event_id, active_only=active_only
+        )
 
-    async def get_all_users(self, event_id: Optional[str] = None) -> List[Dict]:
+    async def get_all_users(
+        self, event_id: Optional[str] = None, active_only: bool = False
+    ) -> List[Dict]:
         """Get all users regardless of payment status."""
-        return await self._get_users_base(event_id=event_id)
+        return await self._get_users_base(event_id=event_id, active_only=active_only)
 
     async def _fix_database(self) -> Dict[str, int]:
         """
