@@ -18,6 +18,7 @@ from src.routers._events_helpers import (  # noqa: F401 — re-exported for exte
     _collect_city,
     _collect_date_and_name,
     _collect_early_bird,
+    _collect_event_image,
     _collect_free_for_types,
     _collect_guest_settings,
     _collect_pricing_config,
@@ -58,6 +59,7 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
     event_date, time_display, event_name = date_result
 
     venue, address = await _collect_venue_info(message.chat.id, state)
+    event_image = await _collect_event_image(message.chat.id, state)
 
     pricing_data = await _collect_pricing_config(message.chat.id, state, event_date)
     if pricing_data is None:
@@ -81,6 +83,9 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
         "enabled": True,
         "free_for_types": [],
     }
+    # Preserve the explicit "Без изображения" choice as None. Omitting the key
+    # would activate a bundled default for a matching legacy event.
+    event_data["image"] = event_image
     event_data.update(pricing_data)
 
     event_data["free_for_types"] = await _collect_free_for_types(message.chat.id, state)

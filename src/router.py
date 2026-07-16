@@ -12,6 +12,7 @@ from textwrap import dedent
 from typing import Dict, List, Optional
 
 from src.app import App, RegisteredUser, GraduateType
+from src.event_images import send_event_image
 from src.routers.admin import admin_handler
 from botspot import commands_menu
 from src.user_interactions import ask_user, ask_user_choice
@@ -1612,6 +1613,11 @@ async def info_handler(message: Message, state: FSMContext, app: App):
 
     has_upcoming = False
     for event in active_events:
+        await send_event_image(
+            message.chat.id,
+            event,
+            caption=event.get("name", event.get("city", "")),
+        )
         info_text += f"<b>🏙️ {event.get('name', event.get('city', ''))}</b>\n"
         if app.is_event_passed(event):
             info_text += (
@@ -1760,6 +1766,11 @@ async def _status_no_registrations(message: Message, app: App):
 async def _show_single_event_welcome(
     message: Message, state: FSMContext, app: App, event, existing_registration
 ):
+    await send_event_image(
+        message.chat.id,
+        event,
+        caption=event.get("name", event.get("city", "")),
+    )
     venue = event.get("venue") or "Уточняется"
     address = event.get("address") or "Уточняется"
     event_info = f"""
@@ -1803,6 +1814,11 @@ async def _show_multi_event_welcome(
 ):
     events_text = "👋 Добро пожаловать!\n\nБлижайшие встречи выпускников:\n\n"
     for event in upcoming_events:
+        await send_event_image(
+            message.chat.id,
+            event,
+            caption=event.get("name", event.get("city", "")),
+        )
         venue = event.get("venue") or "Уточняется"
         address = event.get("address") or ""
         venue_line = venue
