@@ -1,5 +1,6 @@
 """Helper functions for event management (create + manage flows)."""
 
+import html
 from datetime import datetime
 
 from aiogram.fsm.context import FSMContext
@@ -10,6 +11,7 @@ from src.app import (
     EventStatus,
     PricingType,
 )
+from src.templates import TEMPLATE_SPECS, get_template, validate_template
 from src.router import get_event_date_display
 from src.user_interactions import ask_user_choice, ask_user_confirmation, ask_user_raw
 from botspot.utils import send_safe
@@ -830,6 +832,78 @@ async def _handle_edit_guests(
                 await send_safe(chat_id, "❌ Введите число.")
 
 
+async def _handle_edit_message_templates(
+    chat_id: int, state: FSMContext, app: App, event: dict, event_id: str
+) -> None:
+    """Edit the per-event message texts (Maria's «текст сообщений» request)."""
+    choices = {key: spec.title for key, spec in TEMPLATE_SPECS.items()}
+    choices["back"] = "Назад"
+
+    key = await ask_user_choice(
+        chat_id, "Какое сообщение изменить?", choices=choices, state=state, timeout=None
+    )
+    if key == "back" or key not in TEMPLATE_SPECS:
+        return
+
+    spec = TEMPLATE_SPECS[key]
+    current = get_template(event, key)
+    is_custom = bool((event.get("templates") or {}).get(key))
+    placeholders = ", ".join("{" + p + "}" for p in sorted(spec.placeholders))
+
+    # The preview is sent HTML-parsed, so escape it — otherwise the admin sees
+    # bold text instead of the <b> tags they need to edit.
+    await send_safe(
+        chat_id,
+        f"<b>{spec.title}</b>\n"
+        f"{'Изменённый' if is_custom else 'Стандартный'} текст:\n\n"
+        f"<pre>{html.escape(current)}</pre>\n\n"
+        f"Доступные подстановки: {html.escape(placeholders)}",
+    )
+
+    action = await ask_user_choice(
+        chat_id,
+        "Что сделать?",
+        choices={
+            "edit": "Изменить текст",
+            "reset": "Вернуть стандартный",
+            "back": "Назад",
+        },
+        state=state,
+        timeout=None,
+    )
+    if action == "back":
+        return
+
+    if action == "reset":
+        await app.update_event(event_id, {f"templates.{key}": ""})
+        await send_safe(chat_id, f"✅ «{spec.title}» — восстановлен стандартный текст.")
+        return
+
+    resp = await ask_user_raw(
+        chat_id,
+        "Пришлите новый текст сообщения.\n"
+        f"Подстановки: {html.escape(placeholders)}\n"
+        "Для выделения используйте &lt;b&gt;жирный&lt;/b&gt;.",
+        state=state,
+        timeout=None,
+    )
+    if not (resp and resp.text):
+        return
+
+    new_text = resp.text.strip()
+    errors = validate_template(spec, new_text)
+    if errors:
+        await send_safe(
+            chat_id,
+            "❌ Текст не сохранён:\n\n"
+            + "\n".join(f"• {html.escape(e)}" for e in errors),
+        )
+        return
+
+    await app.update_event(event_id, {f"templates.{key}": new_text})
+    await send_safe(chat_id, f"✅ «{spec.title}» обновлён.")
+
+
 async def _handle_edit_event(
     chat_id: int,
     state: FSMContext,
@@ -851,6 +925,7 @@ async def _handle_edit_event(
             "pricing": "Настройки оплаты",
             "early_bird": "Ранняя регистрация",
             "guests": "Настройки гостей",
+            "templates": "Тексты сообщений",
             "back": "Назад",
         },
         state=state,
@@ -877,6 +952,8 @@ async def _handle_edit_event(
         await _handle_edit_early_bird(chat_id, state, app, event, event_id)
     elif field == "guests":
         await _handle_edit_guests(chat_id, state, app, event, event_id)
+    elif field == "templates":
+        await _handle_edit_message_templates(chat_id, state, app, event, event_id)
 
 
 async def _build_event_choices(
