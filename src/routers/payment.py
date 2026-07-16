@@ -14,8 +14,7 @@ from aiogram.types import (
 )
 from datetime import datetime
 from loguru import logger
-from textwrap import dedent
-
+from src import templates
 from src.app import App, GraduateType
 from src.router import is_admin, commands_menu, get_event_date_display
 from src.routers.admin import PaymentInfo
@@ -169,6 +168,19 @@ def _build_payment_formula(event) -> str:
     return "за свой счет"
 
 
+def _season_adjective(event) -> str:
+    """Season adjective for 'на ... встрече', derived from the event date."""
+    date = event.get("date") if event else None
+    if not date:
+        return "ближайшей"
+    return {
+        12: "зимней", 1: "зимней", 2: "зимней",
+        3: "весенней", 4: "весенней", 5: "весенней",
+        6: "летней", 7: "летней", 8: "летней",
+        9: "осенней", 10: "осенней", 11: "осенней",
+    }[date.month]
+
+
 def _check_early_bird(event) -> tuple[bool, object, int]:
     early_bird_deadline = event.get("early_bird_deadline") if event else None
     early_bird_discount_amount = event.get("early_bird_discount", 0) if event else 0
@@ -201,46 +213,45 @@ async def _send_payment_info_messages(
     payment_formula = _build_payment_formula(event)
 
     if graduate_type != GraduateType.NON_GRADUATE.value:
-        payment_msg_part1 = dedent(
-            f"""
-            💰 Оплата мероприятия
-
-            Для оплаты мероприятия используется следующая формула:
-
-            {city} → {payment_formula}
-        """
+        payment_msg_part1 = templates.render(
+            event, "payment_intro", {"city": city, "formula": payment_formula}
         )
         await send_safe(message.chat.id, payment_msg_part1)
         await asyncio.sleep(5)
 
     price_label = (
-        "Стоимость билета для вас"
+        "Минимальный взнос для вас"
         if graduate_type == GraduateType.NON_GRADUATE.value
-        else "Стоимость билета для вашего года выпуска"
+        else "Минимальный взнос для вашего года выпуска"
     )
 
     is_early, early_bird_deadline, early_bird_discount_amount = _check_early_bird(event)
+    season = _season_adjective(event)
 
     if is_early:
         assert early_bird_deadline is not None
         deadline_display = early_bird_deadline.strftime("%d.%m")
-        payment_msg_part2 = dedent(
-            f"""
-            {price_label}: {regular_amount} руб.
-
-            При ранней регистрации (до {deadline_display}) скидка {early_bird_discount_amount} руб!
-            Стоимость билета при ранней регистрации - {discounted_amount} руб.
-
-            Очень ждём вас на весенней встрече! 😊
-            """
+        payment_msg_part2 = templates.render(
+            event,
+            "payment_price_early",
+            {
+                "price_label": price_label,
+                "regular_amount": regular_amount,
+                "deadline": deadline_display,
+                "discount": early_bird_discount_amount,
+                "discounted_amount": discounted_amount,
+                "season": season,
+            },
         )
     else:
-        payment_msg_part2 = dedent(
-            f"""
-            {price_label}: {regular_amount} руб.
-
-            Очень ждём вас на весенней встрече! 😊
-            """
+        payment_msg_part2 = templates.render(
+            event,
+            "payment_price_regular",
+            {
+                "price_label": price_label,
+                "regular_amount": regular_amount,
+                "season": season,
+            },
         )
 
     await send_safe(message.chat.id, payment_msg_part2)
@@ -252,22 +263,22 @@ async def _send_payment_info_messages(
         if is_early and total_regular_with_guests != total_discounted_with_guests:
             guest_msg += (
                 f"\n💰 Итого с гостями: {total_regular_with_guests} руб."
-                f"\n💰 При ранней регистрации: {total_discounted_with_guests} руб."
+                f"\n💰 <b>При ранней регистрации: {total_discounted_with_guests} руб.</b>"
             )
         else:
-            guest_msg += f"\n💰 Итого с гостями: {total_regular_with_guests} руб."
+            guest_msg += f"\n💰 <b>Итого с гостями: {total_regular_with_guests} руб.</b>"
         await send_safe(message.chat.id, guest_msg)
         await asyncio.sleep(2)
 
     await asyncio.sleep(3)
 
-    payment_msg_part3 = dedent(
-        f"""
-        Реквизиты для оплаты:
-        В Сбербанк по номеру телефона
-        Номер телефона - {app.settings.payment_phone_number}
-        Получатель - {app.settings.payment_name}
-        """
+    payment_msg_part3 = templates.render(
+        event,
+        "payment_details",
+        {
+            "phone": app.settings.payment_phone_number,
+            "name": app.settings.payment_name,
+        },
     )
     await send_safe(message.chat.id, payment_msg_part3)
     await asyncio.sleep(3)

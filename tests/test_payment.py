@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, User
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -885,3 +886,28 @@ async def test_process_payment_without_pre_uploaded_pay_later(
 
     # ask_user_choice_raw SHOULD have been called
     mock_ask_user_choice_raw.assert_called_once()
+
+
+class TestSeasonAdjective:
+    """Season wording is derived from the event date (Maria, 14 Jul 2026)."""
+
+    @pytest.mark.parametrize(
+        "month,expected",
+        [
+            (1, "зимней"), (2, "зимней"), (12, "зимней"),
+            (3, "весенней"), (4, "весенней"), (5, "весенней"),
+            (6, "летней"), (7, "летней"), (8, "летней"),
+            (9, "осенней"), (10, "осенней"), (11, "осенней"),
+        ],
+    )
+    def test_season_matches_event_month(self, month, expected):
+        from src.routers.payment import _season_adjective
+
+        event = {"date": datetime(2026, month, 15)}
+        assert _season_adjective(event) == expected
+
+    def test_missing_date_falls_back(self):
+        from src.routers.payment import _season_adjective
+
+        assert _season_adjective({}) == "ближайшей"
+        assert _season_adjective(None) == "ближайшей"

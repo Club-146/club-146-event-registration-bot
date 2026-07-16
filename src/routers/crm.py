@@ -79,13 +79,19 @@ _TEMPLATE_MARKERS = [
 async def _get_notify_users(app: App, audience: str, city_filter) -> tuple:
     """Fetch the target user list and a display name for the audience."""
     if audience == "unpaid":
-        users = await app.get_unpaid_users(event_id=city_filter)
+        users = await app.get_unpaid_users(
+            event_id=city_filter, active_only=city_filter is None
+        )
         audience_name = "не оплативших пользователей"
     elif audience == "paid":
-        users = await app.get_paid_users(event_id=city_filter)
+        users = await app.get_paid_users(
+            event_id=city_filter, active_only=city_filter is None
+        )
         audience_name = "оплативших пользователей"
     else:
-        users = await app.get_all_users(event_id=city_filter)
+        users = await app.get_all_users(
+            event_id=city_filter, active_only=city_filter is None
+        )
         audience_name = "всех пользователей"
     return users, audience_name
 
@@ -322,7 +328,9 @@ async def _build_recipient_list(
         return list(active_ids | deleted_ids)
     # current
     if city_filter == "all":
-        return await app.collection.distinct("user_id")
+        return await app.collection.distinct(
+            "user_id", {"event_id": {"$in": list(event_map)}}
+        )
     return await app.collection.distinct("user_id", {"event_id": city_filter})
 
 
@@ -529,9 +537,9 @@ async def test_user_selection_handler(message: Message, state: FSMContext, app: 
     report += "<i>Примечание: бесплатные мероприятия и учителя автоматически помечаются как оплатившие.</i>\n\n"
 
     # Get counts for all events combined
-    all_users = await app.get_all_users()
-    all_paid = await app.get_paid_users()
-    all_unpaid = await app.get_unpaid_users()
+    all_users = await app.get_all_users(active_only=True)
+    all_paid = await app.get_paid_users(active_only=True)
+    all_unpaid = await app.get_unpaid_users(active_only=True)
 
     report += "<b>Все города:</b>\n"
     report += f"- Всего пользователей: {len(all_users)}\n"
@@ -589,7 +597,7 @@ async def notify_early_payment_handler(message: Message, state: FSMContext, app:
     )
 
     # Get list of users who haven't paid (across all active events)
-    unpaid_users = await app.get_unpaid_users()
+    unpaid_users = await app.get_unpaid_users(active_only=True)
 
     # Check if we have unpaid users
     if not unpaid_users:

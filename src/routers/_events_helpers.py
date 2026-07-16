@@ -1,5 +1,6 @@
 """Helper functions for event management (create + manage flows)."""
 
+import html
 from datetime import datetime
 
 from aiogram.fsm.context import FSMContext
@@ -10,8 +11,19 @@ from src.app import (
     EventStatus,
     PricingType,
 )
+from src.event_images import (
+    event_image_url_from_message,
+    resolve_event_image,
+    send_event_image,
+)
 from src.router import get_event_date_display
-from src.user_interactions import ask_user_choice, ask_user_confirmation, ask_user_raw
+from src.templates import TEMPLATE_SPECS, get_template, validate_template
+from src.user_interactions import (
+    ask_user_choice,
+    ask_user_choice_raw,
+    ask_user_confirmation,
+    ask_user_raw,
+)
 from botspot.utils import send_safe
 
 
@@ -66,6 +78,7 @@ def _format_event_summary(event: dict, reg_count: int = 0) -> str:
     address = event.get("address") or "Не указано"
     lines.append(f"📍 Место: {venue}")
     lines.append(f"📍 Адрес: {address}")
+    lines.append(f"🖼️ Изображение: {'Есть' if resolve_event_image(event) else 'Нет'}")
     lines.append(f"💰 Оплата: {_format_pricing(event)}")
 
     free_for = event.get("free_for_types", [])
@@ -269,6 +282,46 @@ async def _collect_venue_info(
     return venue, address
 
 
+async def _prepare_event_image_response(chat_id: int, response) -> dict | None:
+    """Validate and preview a 146.school URL before accepting it."""
+
+    image = event_image_url_from_message(response)
+
+    if image is None:
+        await send_safe(
+            chat_id,
+            "❌ Нужна абсолютная HTTPS-ссылка на изображение на 146.school.",
+        )
+        return None
+
+    delivered = await send_event_image(
+        chat_id, {"image": image}, caption="Предпросмотр изображения"
+    )
+    if not delivered:
+        await send_safe(
+            chat_id,
+            "❌ Telegram не смог показать это изображение. Оно не сохранено у встречи.",
+        )
+        return None
+    return image
+
+
+async def _collect_event_image(chat_id: int, state: FSMContext) -> dict | None:
+    """Ask for an optional event image during event creation."""
+
+    response = await ask_user_choice_raw(
+        chat_id,
+        "🖼️ Вставьте абсолютную HTTPS-ссылку на изображение на 146.school.",
+        choices={"skip": "Без изображения"},
+        state=state,
+        timeout=None,
+    )
+    if response is None or response == "skip":
+        return None
+
+    return await _prepare_event_image_response(chat_id, response)
+
+
 async def _collect_pricing_config(
     chat_id: int, state: FSMContext, event_date: datetime
 ) -> dict | None:
@@ -469,7 +522,7 @@ async def _handle_toggle_event(
     event: dict,
     event_id: str,
     user_id: int,
-    username: str,
+    username: str | None,
 ) -> None:
     new_enabled = not event.get("enabled", False)
     await app.update_event(event_id, {"enabled": new_enabled})
@@ -496,7 +549,7 @@ async def _handle_archive_event(
     event_id: str,
     reg_count: int,
     user_id: int,
-    username: str,
+    username: str | None,
 ) -> bool:
     """Returns False if user cancelled, True otherwise."""
     if reg_count > 0:
@@ -534,7 +587,7 @@ async def _handle_edit_field_name(
     event: dict,
     event_id: str,
     user_id: int,
-    username: str,
+    username: str | None,
 ) -> None:
     resp = await ask_user_raw(
         chat_id,
@@ -577,10 +630,7 @@ async def _handle_edit_field_date(
                 new_date = new_date.replace(hour=old_date.hour, minute=old_date.minute)
             await app.update_event(
                 event_id,
-                {
-                    "date": new_date,
-                    "date_display": _make_date_display(new_date),
-                },
+                {"date": new_date, "date_display": _make_date_display(new_date)},
             )
             await send_safe(chat_id, "✅ Дата обновлена.")
         except ValueError:
@@ -630,6 +680,69 @@ async def _handle_edit_field_address(
     if resp and resp.text:
         await app.update_event(event_id, {"address": resp.text.strip()})
         await send_safe(chat_id, "✅ Адрес обновлен.")
+
+
+async def _handle_edit_image(
+    chat_id: int,
+    state: FSMContext,
+    app: App,
+    event: dict,
+    event_id: str,
+    user_id: int,
+    username: str | None,
+) -> None:
+    """Attach, replace, or explicitly remove an event image."""
+
+    current_image = resolve_event_image(event)
+    if current_image:
+        choices = {
+            "replace": "Заменить изображение",
+            "remove": "Удалить изображение",
+            "back": "Назад",
+        }
+    else:
+        choices = {"attach": "Добавить изображение", "back": "Назад"}
+
+    action = await ask_user_choice(
+        chat_id,
+        "🖼️ Изображение встречи:",
+        choices=choices,
+        state=state,
+        timeout=None,
+    )
+    if action == "back" or not action:
+        return
+
+    old_source = current_image.get("source_ref") if current_image else None
+    if action == "remove":
+        await app.update_event(event_id, {"image": None})
+        await send_safe(chat_id, "✅ Изображение удалено.")
+        new_image = None
+    else:
+        response = await ask_user_raw(
+            chat_id,
+            "Вставьте абсолютную HTTPS-ссылку на изображение на 146.school:",
+            state=state,
+            timeout=None,
+        )
+        new_image = await _prepare_event_image_response(chat_id, response)
+        if new_image is None:
+            return
+        await app.update_event(event_id, {"image": new_image})
+        await send_safe(chat_id, "✅ Изображение обновлено.")
+
+    await app.save_event_log(
+        event_type="admin_event_action",
+        data={
+            "action": "edit_event",
+            "event_id": event_id,
+            "field": "image",
+            "old_source": old_source,
+            "new_source": new_image.get("source_ref") if new_image else None,
+        },
+        user_id=user_id,
+        username=username,
+    )
 
 
 async def _handle_edit_pricing_formula(
@@ -830,6 +943,78 @@ async def _handle_edit_guests(
                 await send_safe(chat_id, "❌ Введите число.")
 
 
+async def _handle_edit_message_templates(
+    chat_id: int, state: FSMContext, app: App, event: dict, event_id: str
+) -> None:
+    """Edit the per-event message texts (Maria's «текст сообщений» request)."""
+    choices = {key: spec.title for key, spec in TEMPLATE_SPECS.items()}
+    choices["back"] = "Назад"
+
+    key = await ask_user_choice(
+        chat_id, "Какое сообщение изменить?", choices=choices, state=state, timeout=None
+    )
+    if key == "back" or key not in TEMPLATE_SPECS:
+        return
+
+    spec = TEMPLATE_SPECS[key]
+    current = get_template(event, key)
+    is_custom = bool((event.get("templates") or {}).get(key))
+    placeholders = ", ".join("{" + p + "}" for p in sorted(spec.placeholders))
+
+    # The preview is sent HTML-parsed, so escape it — otherwise the admin sees
+    # bold text instead of the <b> tags they need to edit.
+    await send_safe(
+        chat_id,
+        f"<b>{spec.title}</b>\n"
+        f"{'Изменённый' if is_custom else 'Стандартный'} текст:\n\n"
+        f"<pre>{html.escape(current)}</pre>\n\n"
+        f"Доступные подстановки: {html.escape(placeholders)}",
+    )
+
+    action = await ask_user_choice(
+        chat_id,
+        "Что сделать?",
+        choices={
+            "edit": "Изменить текст",
+            "reset": "Вернуть стандартный",
+            "back": "Назад",
+        },
+        state=state,
+        timeout=None,
+    )
+    if action == "back":
+        return
+
+    if action == "reset":
+        await app.update_event(event_id, {f"templates.{key}": ""})
+        await send_safe(chat_id, f"✅ «{spec.title}» — восстановлен стандартный текст.")
+        return
+
+    resp = await ask_user_raw(
+        chat_id,
+        "Пришлите новый текст сообщения.\n"
+        f"Подстановки: {html.escape(placeholders)}\n"
+        "Для выделения используйте &lt;b&gt;жирный&lt;/b&gt;.",
+        state=state,
+        timeout=None,
+    )
+    if not (resp and resp.text):
+        return
+
+    new_text = resp.text.strip()
+    errors = validate_template(spec, new_text)
+    if errors:
+        await send_safe(
+            chat_id,
+            "❌ Текст не сохранён:\n\n"
+            + "\n".join(f"• {html.escape(e)}" for e in errors),
+        )
+        return
+
+    await app.update_event(event_id, {f"templates.{key}": new_text})
+    await send_safe(chat_id, f"✅ «{spec.title}» обновлён.")
+
+
 async def _handle_edit_event(
     chat_id: int,
     state: FSMContext,
@@ -837,7 +1022,7 @@ async def _handle_edit_event(
     event: dict,
     event_id: str,
     user_id: int,
-    username: str,
+    username: str | None,
 ) -> None:
     field = await ask_user_choice(
         chat_id,
@@ -848,9 +1033,11 @@ async def _handle_edit_event(
             "time": "Время",
             "venue": "Место",
             "address": "Адрес",
+            "image": "Изображение",
             "pricing": "Настройки оплаты",
             "early_bird": "Ранняя регистрация",
             "guests": "Настройки гостей",
+            "templates": "Тексты сообщений",
             "back": "Назад",
         },
         state=state,
@@ -871,12 +1058,18 @@ async def _handle_edit_event(
         await _handle_edit_field_venue(chat_id, state, app, event, event_id)
     elif field == "address":
         await _handle_edit_field_address(chat_id, state, app, event, event_id)
+    elif field == "image":
+        await _handle_edit_image(
+            chat_id, state, app, event, event_id, user_id, username
+        )
     elif field == "pricing":
         await _handle_edit_field_pricing(chat_id, state, app, event, event_id)
     elif field == "early_bird":
         await _handle_edit_early_bird(chat_id, state, app, event, event_id)
     elif field == "guests":
         await _handle_edit_guests(chat_id, state, app, event, event_id)
+    elif field == "templates":
+        await _handle_edit_message_templates(chat_id, state, app, event, event_id)
 
 
 async def _build_event_choices(
@@ -946,7 +1139,7 @@ async def _handle_event_action(
     app: App,
     event_id: str,
     user_id: int,
-    username: str,
+    username: str | None,
 ) -> None:
     """Handle edit/toggle/archive for a selected event."""
     event = await app.get_event_by_id(event_id)
