@@ -1,6 +1,7 @@
 """Payment router for the 146 Meetup Register Bot."""
 
 import asyncio
+from html import escape
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -259,7 +260,8 @@ async def _send_payment_info_messages(
     if guests:
         guest_msg = f"\n👥 Гости ({len(guests)}):\n"
         for i, g in enumerate(guests, 1):
-            guest_msg += f"  {i}. {g['name']} — {g['price']} руб.\n"
+            guest_name = escape(str(g["name"]), quote=True)
+            guest_msg += f"  {i}. {guest_name} — {g['price']} руб.\n"
         if is_early and total_regular_with_guests != total_discounted_with_guests:
             guest_msg += (
                 f"\n💰 Итого с гостями: {total_regular_with_guests} руб."
@@ -390,7 +392,8 @@ def _build_user_info_text(
         user_info += f"💰 Сумма (регистрант): {needs_to_pay}\n"
         user_info += f"👥 Гости ({len(guests)}):\n"
         for g in guests:
-            user_info += f"  • {g['name']} — {g['price']} руб.\n"
+            guest_name = escape(str(g["name"]), quote=True)
+            user_info += f"  • {guest_name} — {g['price']} руб.\n"
         user_info += f"💰 Итого: {total_regular_with_guests} руб.\n"
     else:
         user_info += f"💰 Сумма к оплате: {needs_to_pay}\n"

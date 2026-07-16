@@ -547,6 +547,63 @@ def test_build_user_info_text_with_guests():
     assert "2300" in result
 
 
+def test_build_user_info_text_escapes_guest_name_for_telegram_html():
+    from src.routers.payment import _build_user_info_text
+    from src.app import GraduateType
+
+    result = _build_user_info_text(
+        user_id=123,
+        username="alice",
+        city="Пермь",
+        guests=[{"name": '<Тег> & "двойная" \'одинарная\'', "price": 500}],
+        needs_to_pay="1800 руб",
+        total_regular_with_guests=2300,
+        user_registration=None,
+        graduate_type=GraduateType.GRADUATE.value,
+    )
+
+    assert "&lt;Тег&gt; &amp; &quot;двойная&quot; &#x27;одинарная&#x27;" in result
+    assert '<Тег> & "двойная" \'одинарная\'' not in result
+
+
+@pytest.mark.asyncio
+async def test_send_payment_info_escapes_guest_name_for_telegram_html(
+    mock_message,
+    mock_app,
+    mock_send_safe,
+    _mock_botspot_dependencies,
+):
+    from src.app import GraduateType
+    from src.routers.payment import _send_payment_info_messages
+
+    event = {
+        "date": datetime(2026, 7, 15),
+        "pricing_type": "formula",
+        "price_formula_base": 1000,
+        "price_formula_rate": 200,
+        "price_formula_reference_year": 2026,
+        "price_formula_step": 1,
+    }
+    guests = [{"name": '<Тег> & "двойная" \'одинарная\'', "price": 500}]
+
+    with patch("src.routers.payment.asyncio.sleep", new_callable=AsyncMock):
+        await _send_payment_info_messages(
+            message=mock_message,
+            city="Пермь",
+            event=event,
+            graduate_type=GraduateType.GRADUATE.value,
+            regular_amount=1800,
+            discounted_amount=1800,
+            guests=guests,
+            total_regular_with_guests=2300,
+            total_discounted_with_guests=2300,
+        )
+
+    guest_message = mock_send_safe.call_args_list[2].args[1]
+    assert "&lt;Тег&gt; &amp; &quot;двойная&quot; &#x27;одинарная&#x27;" in guest_message
+    assert '<Тег> & "двойная" \'одинарная\'' not in guest_message
+
+
 def test_build_user_info_text_teacher():
     from src.routers.payment import _build_user_info_text
     from src.app import GraduateType
