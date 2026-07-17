@@ -387,6 +387,7 @@ class TestEnums:
 
     def test_payment_status_map(self):
         assert PAYMENT_STATUS_MAP["confirmed"] == "Оплачено"
+        assert PAYMENT_STATUS_MAP["pending"] == "На проверке"
         assert PAYMENT_STATUS_MAP[None] == "Не оплачено"
 
     def test_city_prepositional_map(self):

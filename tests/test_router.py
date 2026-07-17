@@ -534,8 +534,12 @@ def test_format_registration_status_text_multiple():
 
 
 @pytest.mark.asyncio
-async def test_status_handler_null_payment_status_displays_unpaid(
-    mock_message, mock_state, mock_send_safe
+@pytest.mark.parametrize(
+    ("payment_status", "expected_status"),
+    [(None, "Не оплачено"), ("pending", "На проверке")],
+)
+async def test_status_handler_displays_payment_status_in_russian(
+    mock_message, mock_state, mock_send_safe, payment_status, expected_status
 ):
     from src.router import status_handler
 
@@ -545,7 +549,7 @@ async def test_status_handler_null_payment_status_displays_unpaid(
         "graduate_type": "GRADUATE",
         "graduation_year": 2010,
         "class_letter": "А",
-        "payment_status": None,
+        "payment_status": payment_status,
     }
     event = {
         "date_display": "21 Марта",
@@ -564,8 +568,9 @@ async def test_status_handler_null_payment_status_displays_unpaid(
     await status_handler(mock_message, mock_state, app)
 
     status_text = mock_send_safe.call_args.args[1]
-    assert "💰 Статус оплаты: ⏳ не оплачено" in status_text
+    assert f"💰 Статус оплаты: ⏳ {expected_status}" in status_text
     assert "None" not in status_text
+    assert "⏳ pending" not in status_text
 
 
 # ---- Tests for get_event_date_display with year auto-append ----

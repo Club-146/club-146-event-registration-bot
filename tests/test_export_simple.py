@@ -124,7 +124,7 @@ class TestBuildRegisteredRow:
     def test_payment_status_pending(self):
         user = {**_BASE_USER, "payment_status": "pending"}
         row = _build_registered_row(user, None)
-        assert row[8] == "Оплачу позже"
+        assert row[8] == "На проверке"
 
     def test_graduate_type_teacher(self):
         user = {**_BASE_USER, "graduate_type": "TEACHER"}

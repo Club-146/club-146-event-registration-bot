@@ -1,6 +1,6 @@
 """Focused tests for CRM broadcast recipient selection."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -115,3 +115,41 @@ async def test_notify_all_events_requests_active_recipient_scope(audience, metho
 
     assert recipients == [{"user_id": 1}]
     get_users.assert_awaited_once_with(event_id=None, active_only=True)
+
+
+@pytest.mark.asyncio
+async def test_early_payment_report_labels_submitted_receipt_under_review():
+    from src.routers.crm import notify_early_payment_handler
+
+    message = MagicMock()
+    message.chat.id = 123
+    state = AsyncMock()
+    app = MagicMock()
+    app.get_unpaid_users = AsyncMock(
+        return_value=[
+            {
+                "user_id": 456,
+                "username": "test_user",
+                "full_name": "Тест Тестов",
+                "target_city": "Москва",
+                "payment_status": "pending",
+            }
+        ]
+    )
+    status_message = AsyncMock()
+
+    with (
+        patch(
+            "src.routers.crm.ask_user_choice",
+            new=AsyncMock(return_value="dry_run"),
+        ),
+        patch(
+            "src.routers.crm.send_safe",
+            new=AsyncMock(side_effect=[status_message, None]),
+        ),
+    ):
+        await notify_early_payment_handler(message, state, app)
+
+    report = status_message.edit_text.await_args.args[0]
+    assert "💰 На проверке" in report
+    assert "Оплачу позже" not in report
