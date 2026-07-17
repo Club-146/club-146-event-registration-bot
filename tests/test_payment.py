@@ -737,6 +737,58 @@ def test_build_validation_buttons_decline_callback_format():
     assert last_btn.callback_data.startswith("decline_payment_77_")
 
 
+@pytest.mark.asyncio
+async def test_screenshot_upload_persists_pending_with_forwarded_message_id(
+    mock_message,
+    mock_app,
+    mock_send_safe,
+    _mock_botspot_dependencies,
+):
+    from src.app import GraduateType
+    from src.routers.admin import PaymentInfo
+    from src.routers.payment import _handle_screenshot_upload
+
+    response = MagicMock(spec=Message)
+    response.photo = [MagicMock(file_id="proof-photo")]
+    response.document = None
+    response.message_id = 777
+    mock_app.collection.find_one.return_value = {
+        "full_name": "Тест Тестов",
+        "graduation_year": 2010,
+        "class_letter": "А",
+        "graduate_type": GraduateType.GRADUATE.value,
+    }
+    bot = _mock_botspot_dependencies.return_value.bot
+    bot.send_photo = AsyncMock(return_value=MagicMock(message_id=888))
+
+    with patch(
+        "src.routers.payment.parse_payment_info",
+        new=AsyncMock(return_value=PaymentInfo(amount=1800, is_valid=True)),
+    ):
+        result = await _handle_screenshot_upload(
+            mock_message,
+            response,
+            user_id=12345,
+            username="test_user",
+            city="Москва",
+            event_id="aabbccddeeff00112233aabb",
+            guests=[],
+            discount=200,
+            discounted_amount=1800,
+            regular_amount=2000,
+            formula_amount=3000,
+            graduate_type=GraduateType.GRADUATE.value,
+        )
+
+    assert result is True
+    assert mock_app.save_payment_info.await_count == 2
+    source_save, forwarded_save = mock_app.save_payment_info.await_args_list
+    assert source_save.kwargs["payment_status"] == "pending"
+    assert source_save.kwargs["screenshot_message_id"] == 777
+    assert forwarded_save.kwargs["payment_status"] == "pending"
+    assert forwarded_save.kwargs["screenshot_message_id"] == 888
+
+
 # ---- Tests for _get_graduate_type_info ----
 
 

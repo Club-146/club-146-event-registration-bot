@@ -533,6 +533,41 @@ def test_format_registration_status_text_multiple():
     assert "Мария" in result
 
 
+@pytest.mark.asyncio
+async def test_status_handler_null_payment_status_displays_unpaid(
+    mock_message, mock_state, mock_send_safe
+):
+    from src.router import status_handler
+
+    registration = {
+        "target_city": "Москва",
+        "full_name": "Тест Тестов",
+        "graduate_type": "GRADUATE",
+        "graduation_year": 2010,
+        "class_letter": "А",
+        "payment_status": None,
+    }
+    event = {
+        "date_display": "21 Марта",
+        "pricing_type": "formula",
+        "free_for_types": [],
+    }
+    app = MagicMock()
+    app.save_event_log = AsyncMock()
+    app.get_user_active_registrations = AsyncMock(return_value=[registration])
+    app.get_event_for_registration = AsyncMock(return_value=event)
+    app.get_enabled_events = AsyncMock(return_value=[event])
+    app.is_event_passed = MagicMock(return_value=False)
+    mock_message.text = "/status"
+    mock_message.chat.type = "private"
+
+    await status_handler(mock_message, mock_state, app)
+
+    status_text = mock_send_safe.call_args.args[1]
+    assert "💰 Статус оплаты: ⏳ не оплачено" in status_text
+    assert "None" not in status_text
+
+
 # ---- Tests for get_event_date_display with year auto-append ----
 
 

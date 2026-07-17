@@ -600,6 +600,7 @@ async def _forward_proof_to_events_chat(
         regular_amount=regular_amount,
         screenshot_message_id=forwarded_msg.message_id,
         formula_amount=formula_amount,
+        payment_status="pending",
     )
     logger.info(
         f"Payment proof from user {user_id} sent to validation chat with caption"
@@ -662,6 +663,7 @@ async def _handle_screenshot_upload(
         screenshot_message_id=response.message_id,
         formula_amount=formula_amount,
         username=username,
+        payment_status="pending",
     )
 
     try:
