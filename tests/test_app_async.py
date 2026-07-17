@@ -110,7 +110,8 @@ class TestGetUserRegistrations:
 
     @pytest.mark.asyncio
     async def test_get_registration_single(self, app):
-        mock_cursor = AsyncMock()
+        mock_cursor = MagicMock()
+        mock_cursor.sort = MagicMock(return_value=mock_cursor)
         mock_cursor.to_list = AsyncMock(
             return_value=[{"user_id": 123, "target_city": "Москва"}]
         )
@@ -121,8 +122,23 @@ class TestGetUserRegistrations:
         assert result["user_id"] == 123
 
     @pytest.mark.asyncio
+    async def test_get_registration_returns_newest_row(self, app):
+        """Newest registration wins so old seasons don't leak stale data."""
+        mock_cursor = MagicMock()
+        mock_cursor.sort = MagicMock(return_value=mock_cursor)
+        mock_cursor.to_list = AsyncMock(
+            return_value=[{"user_id": 123, "target_city": "Пермь", "_id": "new"}]
+        )
+        app.collection.find = MagicMock(return_value=mock_cursor)
+
+        result = await app.get_user_registration(123)
+        assert result["_id"] == "new"
+        mock_cursor.sort.assert_called_once_with("_id", -1)
+
+    @pytest.mark.asyncio
     async def test_get_registration_none(self, app):
-        mock_cursor = AsyncMock()
+        mock_cursor = MagicMock()
+        mock_cursor.sort = MagicMock(return_value=mock_cursor)
         mock_cursor.to_list = AsyncMock(return_value=[])
         app.collection.find = MagicMock(return_value=mock_cursor)
 

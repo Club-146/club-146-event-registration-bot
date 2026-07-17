@@ -97,6 +97,45 @@ async def test_current_season_announcement_queries_only_enabled_events():
     )
 
 
+@pytest.mark.asyncio
+async def test_all_time_city_audience_reaches_historical_rows():
+    """Perm recovery: history rows whose target_city embeds the city name
+    ("Пермь (Летняя встреча 2025)") or that only link via an archived Perm
+    event must be included, from both active and deleted collections."""
+    app = MagicMock()
+    app.get_all_events = AsyncMock(
+        return_value=[
+            {"_id": "perm-2026", "city": "Пермь"},
+            {"_id": "perm-summer-2025", "city": "Пермь"},
+            {"_id": "moscow-2026", "city": "Москва"},
+        ]
+    )
+    captured = {}
+
+    async def collection_distinct(field, query):
+        captured["active"] = query
+        return [1, 2]
+
+    async def deleted_distinct(field, query):
+        captured["deleted"] = query
+        return [2, 3]
+
+    app.collection.distinct = AsyncMock(side_effect=collection_distinct)
+    app.deleted_users.distinct = AsyncMock(side_effect=deleted_distinct)
+    event_map = {"perm-2026": {"city": "Пермь"}}
+
+    recipients = await _build_recipient_list(app, "all_time", "perm-2026", event_map)
+
+    assert sorted(recipients) == [1, 2, 3]
+    for query in (captured["active"], captured["deleted"]):
+        event_clause, city_clause = query["$or"]
+        assert set(event_clause["event_id"]["$in"]) == {
+            "perm-2026",
+            "perm-summer-2025",
+        }
+        assert city_clause["target_city"]["$regex"] == "^Пермь"
+
+
 @pytest.mark.parametrize(
     ("audience", "method_name"),
     [

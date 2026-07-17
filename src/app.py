@@ -497,8 +497,10 @@ class App:
         return await cursor.to_list(length=None)
 
     async def get_user_registration(self, user_id: int):
-        """Get existing registration for a user (returns first one found)"""
-        registrations = await self.get_user_registrations(user_id)
+        """Get the user's most recent registration (newest row wins, so old
+        seasons don't leak stale profile data into new registrations)."""
+        cursor = self.collection.find({"user_id": user_id}).sort("_id", -1)
+        registrations = await cursor.to_list(length=1)
         return registrations[0] if registrations else None
 
     async def delete_user_registration(

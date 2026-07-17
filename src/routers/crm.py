@@ -1,3 +1,5 @@
+import re
+
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
@@ -319,12 +321,20 @@ async def _build_recipient_list(
             return list(active_ids | deleted_ids)
         ev = event_map.get(city_filter, {})
         city = ev.get("city", "")
-        active_ids = set(
-            await app.collection.distinct("user_id", {"target_city": city})
-        )
-        deleted_ids = set(
-            await app.deleted_users.distinct("user_id", {"target_city": city})
-        )
+        # Historical rows are reachable two ways: via any event (any season,
+        # any status) held in this city, and via legacy target_city values
+        # that embed the city name, e.g. "Пермь (Летняя встреча 2025)".
+        city_event_ids = [
+            str(e["_id"]) for e in await app.get_all_events() if e.get("city") == city
+        ]
+        history_query = {
+            "$or": [
+                {"event_id": {"$in": city_event_ids}},
+                {"target_city": {"$regex": f"^{re.escape(city)}"}},
+            ]
+        }
+        active_ids = set(await app.collection.distinct("user_id", history_query))
+        deleted_ids = set(await app.deleted_users.distinct("user_id", history_query))
         return list(active_ids | deleted_ids)
     # current
     if city_filter == "all":
