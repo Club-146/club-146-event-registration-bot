@@ -11,7 +11,7 @@ from loguru import logger
 from textwrap import dedent
 from typing import Dict, List, Optional
 
-from src.app import App, RegisteredUser, GraduateType
+from src.app import App, RegisteredUser, GraduateType, PAYMENT_STATUS_MAP
 from src.event_images import send_event_image
 from src.routers.admin import admin_handler
 from botspot import commands_menu
@@ -1667,10 +1667,9 @@ def _format_payment_status_line(reg: Dict, event, graduate_type: str) -> str:
 
     payment_status = reg.get("payment_status")
     if payment_status is None:
-        payment_status = "не оплачено"
-    line = (
-        f"💰 Статус оплаты: {_payment_status_emoji(payment_status)} {payment_status}\n"
-    )
+        payment_status = PAYMENT_STATUS_MAP[None]
+    payment_status_display = PAYMENT_STATUS_MAP.get(payment_status, payment_status)
+    line = f"💰 Статус оплаты: {_payment_status_emoji(payment_status)} {payment_status_display}\n"
     if "payment_amount" in reg:
         line += f"💵 Сумма оплаты: {reg['payment_amount']} руб.\n"
     elif payment_status == "pending" and "discounted_payment_amount" in reg:

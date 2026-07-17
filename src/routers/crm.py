@@ -5,7 +5,7 @@ from loguru import logger
 from typing import Dict, Any, Optional
 
 from src.routers.admin import router
-from src.app import App
+from src.app import App, PAYMENT_STATUS_MAP
 from botspot import commands_menu
 from botspot.components.qol.bot_commands_menu import Visibility
 from src.user_interactions import ask_user_choice, ask_user_confirmation, ask_user_raw
@@ -612,15 +612,9 @@ async def notify_early_payment_handler(message: Message, state: FSMContext, app:
         user_id = user.get("user_id", "??")
         full_name = user.get("full_name", "Имя не указано")
         city = user.get("target_city", "Город не указан")
-        payment_status = user.get("payment_status", "Не оплачено")
-
-        # Format payment status
-        if payment_status == "pending":
-            payment_status = "Оплачу позже"
-        elif payment_status == "declined":
-            payment_status = "Отклонено"
-        else:
-            payment_status = "Не оплачено"
+        payment_status = PAYMENT_STATUS_MAP.get(
+            user.get("payment_status"), PAYMENT_STATUS_MAP[None]
+        )
 
         report += f"{i}. {full_name} (@{username or user_id})\n"
         report += f"   🏙️ {city}, 💰 {payment_status}\n\n"
