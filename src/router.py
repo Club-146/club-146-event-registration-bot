@@ -1665,7 +1665,9 @@ def _format_payment_status_line(reg: Dict, event, graduate_type: str) -> str:
             return "💰 Оплата: Бесплатно (организатор)\n"
         return "💰 Оплата: За свой счет\n"
 
-    payment_status = reg.get("payment_status", "не оплачено")
+    payment_status = reg.get("payment_status")
+    if payment_status is None:
+        payment_status = "не оплачено"
     line = (
         f"💰 Статус оплаты: {_payment_status_emoji(payment_status)} {payment_status}\n"
     )

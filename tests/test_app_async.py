@@ -260,6 +260,10 @@ class TestSavePaymentInfo:
             payment_status="pending",
         )
         app.collection.update_one.assert_called_once()
+        update_data = app.collection.update_one.call_args.args[1]["$set"]
+        assert update_data["payment_status"] == "pending"
+        assert update_data["payment_screenshot_id"] == 999
+        assert "screenshot_message_id" not in update_data
 
     @pytest.mark.asyncio
     async def test_save_without_formula(self, app):
