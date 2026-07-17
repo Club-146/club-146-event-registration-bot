@@ -183,6 +183,68 @@ def test_payment_status_emoji_unknown():
     assert _payment_status_emoji("") == "⏳"
 
 
+# ---- Tests for registration info payment status ----
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payment_fields",
+    [pytest.param({}, id="missing"), pytest.param({"payment_status": None}, id="null")],
+)
+async def test_format_single_reg_info_defaults_unpaid_status(payment_fields):
+    from src.router import _format_single_reg_info
+
+    event = {
+        "date_display": "21 Марта",
+        "pricing_type": "formula",
+        "free_for_types": [],
+    }
+    app = MagicMock()
+    app.get_event_for_registration = AsyncMock(return_value=event)
+    reg = {
+        "target_city": "Москва",
+        "full_name": "Тест Тестов",
+        "graduation_year": 2010,
+        "class_letter": "А",
+        **payment_fields,
+    }
+
+    result, event_is_free = await _format_single_reg_info(reg, app)
+
+    assert event_is_free is False
+    assert "Статус оплаты: ⏳ не оплачено" in result
+    assert "None" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payment_fields",
+    [pytest.param({}, id="missing"), pytest.param({"payment_status": None}, id="null")],
+)
+async def test_format_multi_reg_info_defaults_unpaid_status(payment_fields):
+    from src.router import _format_multi_reg_info
+
+    event = {
+        "date_display": "21 Марта",
+        "pricing_type": "formula",
+        "free_for_types": [],
+    }
+    app = MagicMock()
+    app.get_event_for_registration = AsyncMock(return_value=event)
+    reg = {
+        "target_city": "Москва",
+        "full_name": "Тест Тестов",
+        "graduation_year": 2010,
+        "class_letter": "А",
+        **payment_fields,
+    }
+
+    result = await _format_multi_reg_info([reg], app)
+
+    assert "⏳ не оплачено" in result
+    assert "None" not in result
+
+
 # ---- Tests for _format_guest_summary ----
 
 

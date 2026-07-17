@@ -103,7 +103,9 @@ async def _format_multi_reg_info(registrations: List[Dict], app: App) -> str:
         graduate_type = reg.get("graduate_type", GraduateType.GRADUATE.value)
         payment_status = ""
         if not is_event_free(event, graduate_type):
-            status = reg.get("payment_status", "не оплачено")
+            status = reg.get("payment_status")
+            if status is None:
+                status = "не оплачено"
             payment_status = f" - {_payment_status_emoji(status)} {status}"
         info_text += f"• {city} ({get_event_date_display(event)}){payment_status}\n"
         info_text += f"  ФИО: {reg['full_name']}\n"
@@ -127,7 +129,9 @@ async def _format_single_reg_info(reg: Dict, app: App) -> str:
 
     payment_status_line = ""
     if not event_is_free:
-        status = reg.get("payment_status", "не оплачено")
+        status = reg.get("payment_status")
+        if status is None:
+            status = "не оплачено"
         payment_status_line = (
             f"Статус оплаты: {_payment_status_emoji(status)} {status}\n"
         )
