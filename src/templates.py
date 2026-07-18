@@ -54,8 +54,14 @@ TEMPLATE_SPECS: Dict[str, TemplateSpec] = {
         key="payment_price_early",
         title="Оплата: цена (ранняя регистрация)",
         placeholders=frozenset(
-            {"price_label", "regular_amount", "deadline", "discount",
-             "discounted_amount", "season"}
+            {
+                "price_label",
+                "regular_amount",
+                "deadline",
+                "discount",
+                "discounted_amount",
+                "season",
+            }
         ),
         default=dedent(
             """
@@ -148,7 +154,7 @@ class _HtmlChecker(HTMLParser):
     def handle_comment(self, data):
         self.raw_markup.append("comment")
 
-    def handle_decl(self, decl):
+    def handle_decl(self, _decl):
         self.raw_markup.append("declaration")
 
     def handle_pi(self, data):

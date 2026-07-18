@@ -36,7 +36,9 @@ def _run_editor(sent, choices, reply_text=None):
     reply = MagicMock(text=reply_text) if reply_text is not None else None
     return (
         patch.object(H, "send_safe", fake_send_safe),
-        patch.object(H, "ask_user_choice", AsyncMock(side_effect=lambda *a, **k: next(it))),
+        patch.object(
+            H, "ask_user_choice", AsyncMock(side_effect=lambda *a, **k: next(it))
+        ),
         patch.object(H, "ask_user_raw", AsyncMock(return_value=reply)),
     )
 
@@ -60,7 +62,9 @@ async def test_good_edit_is_saved(app, event):
 
 @pytest.mark.asyncio
 async def test_unsupported_html_is_rejected_and_not_stored(app, event):
-    sent = await _edit(app, event, ["payment_price_regular", "edit"], "<div>{season}</div>")
+    sent = await _edit(
+        app, event, ["payment_price_regular", "edit"], "<div>{season}</div>"
+    )
 
     assert event["templates"] == {}, "invalid text must not reach the DB"
     assert "не сохранён" in sent[-1]

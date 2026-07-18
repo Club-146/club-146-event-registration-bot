@@ -558,7 +558,7 @@ def test_build_user_info_text_escapes_guest_name_for_telegram_html():
         user_id=123,
         username="alice",
         city="Пермь",
-        guests=[{"name": '<Тег> & "двойная" \'одинарная\'', "price": 500}],
+        guests=[{"name": "<Тег> & \"двойная\" 'одинарная'", "price": 500}],
         needs_to_pay="1800 руб",
         total_regular_with_guests=2300,
         user_registration=None,
@@ -566,7 +566,7 @@ def test_build_user_info_text_escapes_guest_name_for_telegram_html():
     )
 
     assert "&lt;Тег&gt; &amp; &quot;двойная&quot; &#x27;одинарная&#x27;" in result
-    assert '<Тег> & "двойная" \'одинарная\'' not in result
+    assert "<Тег> & \"двойная\" 'одинарная'" not in result
 
 
 @pytest.mark.asyncio
@@ -587,7 +587,7 @@ async def test_send_payment_info_escapes_guest_name_for_telegram_html(
         "price_formula_reference_year": 2026,
         "price_formula_step": 1,
     }
-    guests = [{"name": '<Тег> & "двойная" \'одинарная\'', "price": 500}]
+    guests = [{"name": "<Тег> & \"двойная\" 'одинарная'", "price": 500}]
 
     with patch("src.routers.payment.asyncio.sleep", new_callable=AsyncMock):
         await _send_payment_info_messages(
@@ -603,8 +603,10 @@ async def test_send_payment_info_escapes_guest_name_for_telegram_html(
         )
 
     guest_message = mock_send_safe.call_args_list[2].args[1]
-    assert "&lt;Тег&gt; &amp; &quot;двойная&quot; &#x27;одинарная&#x27;" in guest_message
-    assert '<Тег> & "двойная" \'одинарная\'' not in guest_message
+    assert (
+        "&lt;Тег&gt; &amp; &quot;двойная&quot; &#x27;одинарная&#x27;" in guest_message
+    )
+    assert "<Тег> & \"двойная\" 'одинарная'" not in guest_message
 
 
 def test_build_user_info_text_teacher():
@@ -998,6 +1000,111 @@ async def test_process_payment_without_pre_uploaded_pay_later(
 
     # ask_user_choice_raw SHOULD have been called
     mock_ask_user_choice_raw.assert_called_once()
+    choices = mock_ask_user_choice_raw.call_args.kwargs["choices"]
+    assert list(choices.keys()) == [
+        "paid_on_site",
+        "paid_to_maria",
+        "pay_later",
+        "too_expensive",
+    ]
+    assert choices["paid_on_site"] == "Оплатил(а) на сайте"
+    assert choices["paid_to_maria"] == "Оплатил(а) Маше"
+
+
+@pytest.mark.asyncio
+async def test_process_payment_paid_on_site_asks_for_proof(
+    mock_message,
+    mock_state,
+    mock_app,
+    mock_send_safe,
+    mock_ask_user_choice_raw,
+    mock_ask_user_raw,
+    mock_handle_screenshot_upload,
+):
+    """'Оплатил(а) на сайте' → ask for screenshot/PDF → handle as payment proof."""
+    from src.app import GraduateType
+    from src.routers.payment import process_payment
+
+    mock_app.collection.find_one.return_value = {
+        "user_id": 12345,
+        "event_id": "aabbccddeeff00112233aabb",
+        "graduate_type": GraduateType.GRADUATE.value,
+    }
+    mock_ask_user_choice_raw.return_value = "paid_on_site"
+    proof = AsyncMock(spec=Message)
+    proof.photo = [MagicMock()]
+    mock_ask_user_raw.return_value = proof
+
+    result = await process_payment(
+        mock_message,
+        mock_state,
+        "aabbccddeeff00112233aabb",
+        2010,
+        graduate_type=GraduateType.GRADUATE.value,
+    )
+
+    assert result is True
+    mock_ask_user_raw.assert_called_once()
+    prompt = mock_ask_user_raw.call_args.args[1]
+    assert "скриншот" in prompt.lower() or "PDF" in prompt
+    assert "сайт" in prompt.lower()
+    mock_handle_screenshot_upload.assert_called_once()
+    assert mock_handle_screenshot_upload.call_args[0][1] is proof
+
+    actions = [
+        c[0][1].get("action")
+        for c in mock_app.save_event_log.call_args_list
+        if c[0] and isinstance(c[0][1], dict)
+    ]
+    assert "paid_on_site_selected" in actions
+
+
+@pytest.mark.asyncio
+async def test_process_payment_paid_to_maria_asks_for_proof(
+    mock_message,
+    mock_state,
+    mock_app,
+    mock_send_safe,
+    mock_ask_user_choice_raw,
+    mock_ask_user_raw,
+    mock_handle_screenshot_upload,
+):
+    """'Оплатил(а) Маше' → ask for transfer screenshot/PDF → handle as payment proof."""
+    from src.app import GraduateType
+    from src.routers.payment import process_payment
+
+    mock_app.collection.find_one.return_value = {
+        "user_id": 12345,
+        "event_id": "aabbccddeeff00112233aabb",
+        "graduate_type": GraduateType.GRADUATE.value,
+    }
+    mock_ask_user_choice_raw.return_value = "paid_to_maria"
+    proof = AsyncMock(spec=Message)
+    proof.document = MagicMock()
+    proof.document.mime_type = "application/pdf"
+    mock_ask_user_raw.return_value = proof
+
+    result = await process_payment(
+        mock_message,
+        mock_state,
+        "aabbccddeeff00112233aabb",
+        2010,
+        graduate_type=GraduateType.GRADUATE.value,
+    )
+
+    assert result is True
+    mock_ask_user_raw.assert_called_once()
+    prompt = mock_ask_user_raw.call_args.args[1]
+    assert "Маше" in prompt or "перевод" in prompt.lower()
+    mock_handle_screenshot_upload.assert_called_once()
+    assert mock_handle_screenshot_upload.call_args[0][1] is proof
+
+    actions = [
+        c[0][1].get("action")
+        for c in mock_app.save_event_log.call_args_list
+        if c[0] and isinstance(c[0][1], dict)
+    ]
+    assert "paid_to_maria_selected" in actions
 
 
 class TestSeasonAdjective:
@@ -1006,10 +1113,18 @@ class TestSeasonAdjective:
     @pytest.mark.parametrize(
         "month,expected",
         [
-            (1, "зимней"), (2, "зимней"), (12, "зимней"),
-            (3, "весенней"), (4, "весенней"), (5, "весенней"),
-            (6, "летней"), (7, "летней"), (8, "летней"),
-            (9, "осенней"), (10, "осенней"), (11, "осенней"),
+            (1, "зимней"),
+            (2, "зимней"),
+            (12, "зимней"),
+            (3, "весенней"),
+            (4, "весенней"),
+            (5, "весенней"),
+            (6, "летней"),
+            (7, "летней"),
+            (8, "летней"),
+            (9, "осенней"),
+            (10, "осенней"),
+            (11, "осенней"),
         ],
     )
     def test_season_matches_event_month(self, month, expected):

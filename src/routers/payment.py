@@ -175,10 +175,18 @@ def _season_adjective(event) -> str:
     if not date:
         return "ближайшей"
     return {
-        12: "зимней", 1: "зимней", 2: "зимней",
-        3: "весенней", 4: "весенней", 5: "весенней",
-        6: "летней", 7: "летней", 8: "летней",
-        9: "осенней", 10: "осенней", 11: "осенней",
+        12: "зимней",
+        1: "зимней",
+        2: "зимней",
+        3: "весенней",
+        4: "весенней",
+        5: "весенней",
+        6: "летней",
+        7: "летней",
+        8: "летней",
+        9: "осенней",
+        10: "осенней",
+        11: "осенней",
     }[date.month]
 
 
@@ -271,16 +279,16 @@ async def _send_payment_info_messages(
                 f"\n💰 <b>При ранней регистрации: {total_discounted_with_guests} руб.</b>"
             )
         else:
-            guest_msg += f"\n💰 <b>Итого с гостями: {total_regular_with_guests} руб.</b>"
+            guest_msg += (
+                f"\n💰 <b>Итого с гостями: {total_regular_with_guests} руб.</b>"
+            )
         await send_safe(message.chat.id, guest_msg)
         await asyncio.sleep(2)
 
     await asyncio.sleep(3)
 
     # Same total the user is told to pay (early-bird + guests when applicable).
-    pay_amount = (
-        total_discounted_with_guests if is_early else total_regular_with_guests
-    )
+    pay_amount = total_discounted_with_guests if is_early else total_regular_with_guests
     pay_url = build_pay_url(
         app.settings.payment_site_base_url,
         pay_amount,
@@ -388,6 +396,87 @@ async def _handle_too_expensive(
             "Что-то пошло не так. Пожалуйста, используйте команду /cancel_registration для отмены регистрации.",
             reply_markup=ReplyKeyboardRemove(),
         )
+
+
+async def _handle_paid_await_proof(
+    message: Message,
+    state: FSMContext,
+    user_id: int,
+    username: str,
+    city: str,
+    event_id: str,
+    guests: list,
+    discount: int,
+    discounted_amount: int,
+    regular_amount: int,
+    formula_amount: int,
+    graduate_type: str,
+    payment_method: str,
+) -> bool:
+    """User said they already paid (site or Maria) — ask for screenshot/PDF proof.
+
+    payment_method: "on_site" | "to_maria" (matches choice keys paid_on_site / paid_to_maria).
+    """
+    method_label = "сайт" if payment_method == "on_site" else "Маша"
+    await app.log_registration_step(
+        user_id=user_id,
+        username=username,
+        step=f"Оплатил(а) ({method_label}) — ждём скриншот",
+    )
+    await app.save_event_log(
+        "payment_action",
+        {
+            "action": f"paid_{payment_method}_selected",
+            "city": city,
+            "amount": discounted_amount,
+            "regular_amount": regular_amount,
+            "graduate_type": graduate_type,
+            "payment_method": payment_method,
+        },
+        user_id,
+        username,
+    )
+
+    if payment_method == "on_site":
+        proof_prompt = (
+            "Пожалуйста, отправьте скриншот или PDF подтверждения оплаты "
+            "(транзакции с сайта)."
+        )
+    else:
+        proof_prompt = (
+            "Пожалуйста, отправьте скриншот или PDF подтверждения перевода Маше."
+        )
+
+    proof_response = await ask_user_raw(
+        message.chat.id,
+        proof_prompt,
+        state=state,
+        timeout=3600,
+    )
+
+    if proof_response is None:
+        await send_safe(
+            message.chat.id,
+            "⏰ Не получен ответ в течение часа. Пожалуйста, используйте команду /pay "
+            "и пришлите скриншот или PDF подтверждения оплаты.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return False
+
+    return await _handle_screenshot_upload(
+        message,
+        proof_response,
+        user_id,
+        username,
+        city,
+        event_id,
+        guests,
+        discount,
+        discounted_amount,
+        regular_amount,
+        formula_amount,
+        graduate_type,
+    )
 
 
 def _build_user_info_text(
@@ -782,7 +871,10 @@ async def process_payment(
             graduation_year=graduation_year,
         )
 
+    # 1–2: already paid → ask for proof; 3–4: defer / cancel (existing).
     choices = {
+        "paid_on_site": "Оплатил(а) на сайте",
+        "paid_to_maria": "Оплатил(а) Маше",
         "pay_later": "Оплачу позже",
         "too_expensive": "Ой, нет, что-то слишком дорого, я передумал",
     }
@@ -802,7 +894,7 @@ async def process_payment(
 
     response = await ask_user_choice_raw(
         message.chat.id,
-        "Пожалуйста, отправьте скриншот подтверждения оплаты (фото или PDF) или выберите опцию ниже:",
+        "Выберите опцию ниже — или сразу отправьте скриншот/PDF подтверждения оплаты:",
         choices=choices,
         state=state,
         timeout=3600,
@@ -811,12 +903,44 @@ async def process_payment(
     if response is None:
         await send_safe(
             message.chat.id,
-            "⏰ Не получен ответ в течение 20 минут. Пожалуйста, используйте команду /pay для оплаты.",
+            "⏰ Не получен ответ в течение часа. Пожалуйста, используйте команду /pay для оплаты.",
             reply_markup=ReplyKeyboardRemove(),
         )
-        return
+        return False
 
     if isinstance(response, str):
+        if response == "paid_on_site":
+            return await _handle_paid_await_proof(
+                message,
+                state,
+                user_id,
+                username,
+                city,
+                event_id,
+                guests,
+                discount,
+                discounted_amount,
+                regular_amount,
+                formula_amount,
+                graduate_type,
+                payment_method="on_site",
+            )
+        if response == "paid_to_maria":
+            return await _handle_paid_await_proof(
+                message,
+                state,
+                user_id,
+                username,
+                city,
+                event_id,
+                guests,
+                discount,
+                discounted_amount,
+                regular_amount,
+                formula_amount,
+                graduate_type,
+                payment_method="to_maria",
+            )
         if response == "pay_later":
             await _handle_pay_later(
                 message,
@@ -830,7 +954,7 @@ async def process_payment(
                 graduate_type,
             )
             return False
-        elif response == "too_expensive":
+        if response == "too_expensive":
             await _handle_too_expensive(
                 message,
                 user_id,
@@ -843,6 +967,7 @@ async def process_payment(
             )
             return False
 
+    # Direct photo/PDF without pressing a button (shortcut).
     return await _handle_screenshot_upload(
         message,
         response,

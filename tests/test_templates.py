@@ -34,7 +34,9 @@ class TestValidation:
         assert any("{bogus}" in e for e in errors)
 
     def test_rejects_missing_required_placeholders(self):
-        errors = validate_template(spec("payment_price_regular"), "Цена: {regular_amount}")
+        errors = validate_template(
+            spec("payment_price_regular"), "Цена: {regular_amount}"
+        )
         assert any("Обязательные подстановки пропущены" in e for e in errors)
 
     def test_rejects_placeholder_valid_for_another_template(self):
@@ -43,7 +45,9 @@ class TestValidation:
         assert any("Неизвестные подстановки" in e for e in errors)
 
     def test_rejects_stray_brace(self):
-        errors = validate_template(spec("payment_price_regular"), "Цена: {regular_amount")
+        errors = validate_template(
+            spec("payment_price_regular"), "Цена: {regular_amount"
+        )
         assert any("скобка" in e for e in errors)
 
     def test_rejects_unsupported_html_tag(self):
@@ -83,9 +87,15 @@ class TestValidation:
 
 class TestRender:
     def test_default_used_when_event_has_no_templates(self):
-        out = render({}, "payment_price_regular",
-                     {"price_label": "Минимальный взнос", "regular_amount": 1500,
-                      "season": "летней"})
+        out = render(
+            {},
+            "payment_price_regular",
+            {
+                "price_label": "Минимальный взнос",
+                "regular_amount": 1500,
+                "season": "летней",
+            },
+        )
         assert "<b>Минимальный взнос: 1500 руб.</b>" in out
         assert "на летней встрече" in out
 
@@ -95,8 +105,11 @@ class TestRender:
                 "payment_price_regular": "{price_label}: {regular_amount}, {season}"
             }
         }
-        out = render(event, "payment_price_regular",
-                     {"price_label": "x", "regular_amount": 999, "season": "летней"})
+        out = render(
+            event,
+            "payment_price_regular",
+            {"price_label": "x", "regular_amount": 999, "season": "летней"},
+        )
         assert out == "x: 999, летней"
 
     def test_context_values_are_html_escaped(self):
@@ -115,8 +128,11 @@ class TestRender:
     def test_invalid_stored_template_falls_back_to_default(self):
         # A bad edit must never brick the payment flow.
         event = {"templates": {"payment_price_regular": "<div>broken {bogus}"}}
-        out = render(event, "payment_price_regular",
-                     {"price_label": "Взнос", "regular_amount": 1500, "season": "летней"})
+        out = render(
+            event,
+            "payment_price_regular",
+            {"price_label": "Взнос", "regular_amount": 1500, "season": "летней"},
+        )
         assert "<b>Взнос: 1500 руб.</b>" in out
         assert "broken" not in out
 
@@ -134,20 +150,26 @@ class TestRender:
         # syntax isn't a placeholder, so it is rejected as a stray brace and
         # never evaluated.
         event = {"templates": {"payment_price_regular": "{regular_amount.__class__}"}}
-        out = render(event, "payment_price_regular",
-                     {"price_label": "Взнос", "regular_amount": 1500, "season": "летней"})
+        out = render(
+            event,
+            "payment_price_regular",
+            {"price_label": "Взнос", "regular_amount": 1500, "season": "летней"},
+        )
         assert "class" not in out
         assert "<b>Взнос: 1500 руб.</b>" in out  # fell back to the default
 
     def test_dunder_access_is_rejected_at_edit_time(self):
-        errors = validate_template(spec("payment_price_regular"),
-                                   "{regular_amount.__class__}")
+        errors = validate_template(
+            spec("payment_price_regular"), "{regular_amount.__class__}"
+        )
         assert errors, "attribute-access syntax must not be accepted"
 
     def test_get_template_returns_default_for_empty_string(self):
         event = {"templates": {"payment_price_regular": ""}}
-        assert get_template(event, "payment_price_regular") == \
-            spec("payment_price_regular").default
+        assert (
+            get_template(event, "payment_price_regular")
+            == spec("payment_price_regular").default
+        )
 
     def test_none_event_uses_default(self):
         assert get_template(None, "payment_intro") == spec("payment_intro").default
@@ -160,4 +182,6 @@ class TestSpecs:
 
         s = TEMPLATE_SPECS[key]
         used = set(re.findall(r"\{(\w+)\}", s.default))
-        assert used <= s.placeholders, f"{key} default uses undeclared {used - s.placeholders}"
+        assert used <= s.placeholders, (
+            f"{key} default uses undeclared {used - s.placeholders}"
+        )
