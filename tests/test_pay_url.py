@@ -21,6 +21,11 @@ class TestSplitFullName:
         assert split_full_name("") == ("", "")
         assert split_full_name("   ") == ("", "")
 
+    def test_western_order_corrected(self):
+        # User typed Имя Фамилия — pay link should still map to form fields correctly.
+        assert split_full_name("Петр Лавров") == ("Петр", "Лавров")
+        assert split_full_name("Иван Иванов") == ("Иван", "Иванов")
+
 
 class TestBuildPayUrl:
     def test_encodes_cyrillic_and_amount(self):

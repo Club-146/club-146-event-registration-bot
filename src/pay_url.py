@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Optional, Tuple, Union
 from urllib.parse import urlencode
 
+from src.name_order import parse_fio_line, split_for_donate_form
+
 
 def split_full_name(full_name: str) -> Tuple[str, str]:
     """Map bot FIO (Фамилия Имя [Отчество]) to donate form (name, surname).
@@ -12,15 +14,17 @@ def split_full_name(full_name: str) -> Tuple[str, str]:
     Bot registration stores Russian order: first token is surname, rest is
     given name (+ optional patronymic). Donate form expects name/surname fields.
     Single token → name only, empty surname.
+
+    Also corrects clear Western-order input (Имя Фамилия) via name_order heuristics
+    so pay links do not land with inverted fields.
     """
-    parts = (full_name or "").strip().split()
-    if not parts:
-        return "", ""
-    if len(parts) == 1:
-        return parts[0], ""
-    surname = parts[0]
-    name = " ".join(parts[1:])
-    return name, surname
+    return split_for_donate_form(full_name)
+
+
+def normalize_full_name(full_name: str) -> str:
+    """Return storage form Фамилия Имя [Отчество], auto-fixing clear Western order."""
+    g = parse_fio_line(full_name)
+    return g.full_name or " ".join((full_name or "").split())
 
 
 def build_pay_url(

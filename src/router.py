@@ -829,7 +829,7 @@ async def _collect_full_name(
     while full_name is None:
         question = dedent("""
             Представьтесь, пожалуйста.
-            Можно имя и фамилию, можно полные ФИО
+            Удобнее: <b>Фамилия Имя</b> (можно с отчеством)
             """)
         response = await ask_user(message.chat.id, question, state=state, timeout=None)
         if response is None:
@@ -846,6 +846,31 @@ async def _collect_full_name(
             await send_safe(
                 message.chat.id, f"❌ {error} Пожалуйста, попробуйте еще раз."
             )
+    # Soft order fix: people often type Имя Фамилия; we store Фамилия Имя.
+    # High confidence → silent normalize. Medium → one choice, default keep as typed.
+    from src.name_order import parse_fio_line
+
+    guess = parse_fio_line(full_name)
+    if guess.swapped_from_input and guess.confidence == "high" and guess.full_name:
+        full_name = guess.full_name
+    elif guess.swapped_from_input and guess.confidence == "medium" and guess.full_name:
+        choice = await ask_user_choice(
+            message.chat.id,
+            dedent(f"""
+                Похоже, имя и фамилия в другом порядке.
+                Записать как <b>{guess.full_name}</b>?
+                """).strip(),
+            choices={
+                "fix": f"Да: {guess.full_name}",
+                "keep": f"Оставить: {full_name}",
+            },
+            state=state,
+            timeout=60,
+            default_choice="keep",
+            columns=1,
+        )
+        if choice == "fix":
+            full_name = guess.full_name
     log_msg = await app.log_registration_step(
         user_id, username, "Ввод ФИО", f"ФИО: {full_name}"
     )
