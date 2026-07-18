@@ -155,6 +155,174 @@ async def test_cancel_registration_handler_no_registrations(
     assert "нет активных регистраций" in args[1].lower()
 
 
+@pytest.mark.asyncio
+async def test_cancel_hides_past_events_behind_more(
+    mock_message, mock_state, mock_app, mock_send_safe, mock_ask_user_choice
+):
+    """First cancel screen lists only current events + «Больше событий»."""
+    from src.router import _cancel_one_of_many_registrations
+
+    current = {
+        "event_id": "ev_perm",
+        "target_city": "Пермь",
+        "full_name": "Петр Лавров",
+        "graduation_year": 2003,
+        "class_letter": "Б",
+    }
+    past_msk = {
+        "event_id": "ev_msk",
+        "target_city": "Москва",
+        "full_name": "Петр Лавров",
+        "graduation_year": 2003,
+        "class_letter": "Б",
+    }
+    past_spb = {
+        "event_id": "ev_spb",
+        "target_city": "Санкт-Петербург",
+        "full_name": "Петр Лавров",
+        "graduation_year": 2003,
+        "class_letter": "Б",
+    }
+    events = {
+        "ev_perm": {
+            "_id": "ev_perm",
+            "city": "Пермь",
+            "date": datetime(2026, 8, 1),
+            "date_display": "1 Августа, Сб",
+        },
+        "ev_msk": {
+            "_id": "ev_msk",
+            "city": "Москва",
+            "date": datetime(2026, 3, 21),
+            "date_display": "21 Марта, Сб",
+        },
+        "ev_spb": {
+            "_id": "ev_spb",
+            "city": "Санкт-Петербург",
+            "date": datetime(2026, 3, 28),
+            "date_display": "28 Марта, Сб",
+        },
+    }
+
+    async def get_event(reg):
+        return events[reg["event_id"]]
+
+    mock_app.get_event_for_registration = AsyncMock(side_effect=get_event)
+    # Today is after March, before August (test date is 2026-07-18 per environment)
+    mock_app.is_event_passed = MagicMock(
+        side_effect=lambda e: e["date"] < datetime(2026, 7, 18)
+    )
+    mock_ask_user_choice.return_value = "ev_perm"
+
+    await _cancel_one_of_many_registrations(
+        mock_message, mock_state, mock_app, [current, past_msk, past_spb]
+    )
+
+    # First prompt only: current + more + all + cancel
+    first_choices = mock_ask_user_choice.call_args_list[0].kwargs["choices"]
+    assert "ev_perm" in first_choices
+    assert "ev_msk" not in first_choices
+    assert "ev_spb" not in first_choices
+    assert first_choices["more"] == "Больше событий"
+    assert "all" in first_choices
+    assert "cancel" in first_choices
+    assert mock_ask_user_choice.call_count == 1
+    mock_app.delete_user_registration.assert_called_once_with(12345, "ev_perm")
+
+
+@pytest.mark.asyncio
+async def test_cancel_more_events_shows_past(
+    mock_message, mock_state, mock_app, mock_send_safe, mock_ask_user_choice
+):
+    """«Больше событий» reveals past registrations for cancel."""
+    from src.router import _cancel_one_of_many_registrations
+
+    current = {
+        "event_id": "ev_perm",
+        "target_city": "Пермь",
+        "full_name": "Петр",
+        "graduation_year": 2003,
+        "class_letter": "Б",
+    }
+    past = {
+        "event_id": "ev_msk",
+        "target_city": "Москва",
+        "full_name": "Петр",
+        "graduation_year": 2003,
+        "class_letter": "Б",
+    }
+    events = {
+        "ev_perm": {
+            "date": datetime(2026, 8, 1),
+            "date_display": "1 Августа, Сб",
+            "city": "Пермь",
+        },
+        "ev_msk": {
+            "date": datetime(2026, 3, 21),
+            "date_display": "21 Марта, Сб",
+            "city": "Москва",
+        },
+    }
+
+    mock_app.get_event_for_registration = AsyncMock(
+        side_effect=lambda reg: events[reg["event_id"]]
+    )
+    mock_app.is_event_passed = MagicMock(
+        side_effect=lambda e: e["date"] < datetime(2026, 7, 18)
+    )
+    mock_ask_user_choice.side_effect = ["more", "ev_msk"]
+
+    await _cancel_one_of_many_registrations(
+        mock_message, mock_state, mock_app, [current, past]
+    )
+
+    assert mock_ask_user_choice.call_count == 2
+    second_choices = mock_ask_user_choice.call_args_list[1].kwargs["choices"]
+    assert "ev_msk" in second_choices
+    assert "ev_perm" not in second_choices
+    assert "more" not in second_choices
+    second_prompt = mock_ask_user_choice.call_args_list[1].args[1]
+    assert "Прошедшие" in second_prompt
+    mock_app.delete_user_registration.assert_called_once_with(12345, "ev_msk")
+
+
+@pytest.mark.asyncio
+async def test_cancel_only_past_shows_them_immediately(
+    mock_message, mock_state, mock_app, mock_send_safe, mock_ask_user_choice
+):
+    """If every registration is past, list them on the first screen (no «more»)."""
+    from src.router import _cancel_one_of_many_registrations
+
+    past_a = {
+        "event_id": "ev_a",
+        "target_city": "Москва",
+        "full_name": "Петр",
+        "graduation_year": 2003,
+        "class_letter": "Б",
+    }
+    past_b = {
+        "event_id": "ev_b",
+        "target_city": "Санкт-Петербург",
+        "full_name": "Петр",
+        "graduation_year": 2003,
+        "class_letter": "Б",
+    }
+    mock_app.get_event_for_registration = AsyncMock(
+        return_value={"date": datetime(2026, 3, 1), "date_display": "1 Марта"}
+    )
+    mock_app.is_event_passed = MagicMock(return_value=True)
+    mock_ask_user_choice.return_value = "cancel"
+
+    await _cancel_one_of_many_registrations(
+        mock_message, mock_state, mock_app, [past_a, past_b]
+    )
+
+    choices = mock_ask_user_choice.call_args.kwargs["choices"]
+    assert "ev_a" in choices and "ev_b" in choices
+    assert "more" not in choices
+    mock_app.delete_user_registration.assert_not_called()
+
+
 # ---- Tests for _payment_status_emoji ----
 
 

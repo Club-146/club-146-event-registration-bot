@@ -1530,30 +1530,49 @@ async def _cancel_single_registration(
         )
 
 
-async def _cancel_one_of_many_registrations(
-    message: Message, state: FSMContext, app: App, registrations
-):
-    assert message.from_user is not None
-    user_id = message.from_user.id
-
-    choices = {}
+async def _partition_regs_current_past(
+    app: App, registrations: list
+) -> tuple[list, list]:
+    """Split registrations into current/upcoming vs past (by event date)."""
+    current: list = []
+    past: list = []
     for reg in registrations:
+        event = await app.get_event_for_registration(reg)
+        if event and app.is_event_passed(event):
+            past.append(reg)
+        else:
+            # No event doc, or date still ahead — treat as current so user can act.
+            current.append(reg)
+    return current, past
+
+
+async def _build_cancel_reg_choices(
+    app: App, regs: list, *, include_more: bool = False
+) -> dict:
+    choices: dict = {}
+    for reg in regs:
         city = reg["target_city"]
         eid = reg["event_id"]
         event = await app.get_event_for_registration(reg)
         choices[eid] = f"{city} ({get_event_date_display(event)})"
+    if include_more:
+        choices["more"] = "Больше событий"
     choices["all"] = "Отменить все регистрации"
     choices["cancel"] = "Ничего не отменять"
+    return choices
 
-    response = await ask_user_choice(
-        message.chat.id,
-        "Выберите, какую регистрацию вы хотите отменить:",
-        choices=choices,
-        state=state,
-        timeout=None,
-    )
 
-    if response == "cancel":
+async def _apply_cancel_choice(
+    message: Message,
+    app: App,
+    registrations: list,
+    response: str,
+) -> None:
+    """Handle a cancel-picker answer that is not «more» (all / cancel / event_id)."""
+    assert message.from_user is not None
+    user_id = message.from_user.id
+
+    if response == "cancel" or response is None:
         await send_safe(
             message.chat.id,
             "Отмена операции. Ваши регистрации сохранены.",
@@ -1572,19 +1591,56 @@ async def _cancel_one_of_many_registrations(
             "Все ваши регистрации отменены. Если передумаете, используйте /start чтобы зарегистрироваться снова.",
             reply_markup=ReplyKeyboardRemove(),
         )
-    else:
-        reg = next(r for r in registrations if r["event_id"] == response)
-        full_name = reg["full_name"]
-        city = reg["target_city"]
-        await app.delete_user_registration(user_id, response)
-        await app.log_registration_canceled(
-            user_id, message.from_user.username or "", full_name, city
-        )
-        await send_safe(
+        return
+
+    reg = next(r for r in registrations if r["event_id"] == response)
+    full_name = reg["full_name"]
+    city = reg["target_city"]
+    await app.delete_user_registration(user_id, response)
+    await app.log_registration_canceled(
+        user_id, message.from_user.username or "", full_name, city
+    )
+    await send_safe(
+        message.chat.id,
+        f"Ваша регистрация в городе {city} отменена. Если передумаете, используйте /start чтобы зарегистрироваться снова.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+async def _cancel_one_of_many_registrations(
+    message: Message, state: FSMContext, app: App, registrations
+):
+    """Pick which registration to cancel.
+
+    Past events stay behind «Больше событий» so the first screen is current only.
+    If every registration is past, show them immediately (nothing to hide behind).
+    """
+    assert message.from_user is not None
+
+    current_regs, past_regs = await _partition_regs_current_past(app, registrations)
+    primary_regs = current_regs if current_regs else past_regs
+    show_more = bool(current_regs and past_regs)
+
+    response = await ask_user_choice(
+        message.chat.id,
+        "Выберите, какую регистрацию вы хотите отменить:",
+        choices=await _build_cancel_reg_choices(
+            app, primary_regs, include_more=show_more
+        ),
+        state=state,
+        timeout=None,
+    )
+
+    if response == "more":
+        response = await ask_user_choice(
             message.chat.id,
-            f"Ваша регистрация в городе {city} отменена. Если передумаете, используйте /start чтобы зарегистрироваться снова.",
-            reply_markup=ReplyKeyboardRemove(),
+            "Прошедшие встречи — выберите, какую регистрацию отменить:",
+            choices=await _build_cancel_reg_choices(app, past_regs, include_more=False),
+            state=state,
+            timeout=None,
         )
+
+    await _apply_cancel_choice(message, app, registrations, response)
 
 
 @commands_menu.add_command("info", "Информация о встречах")
