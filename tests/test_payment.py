@@ -75,6 +75,9 @@ def mock_app():
         mock_app.settings = MagicMock()
         mock_app.settings.payment_phone_number = "+1234567890"
         mock_app.settings.payment_name = "Test Receiver"
+        mock_app.settings.payment_site_base_url = (
+            "https://staging.146.school.calmmage.com"
+        )
         mock_app.settings.events_chat_id = -123456789
         yield mock_app
 

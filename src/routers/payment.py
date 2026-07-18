@@ -204,8 +204,11 @@ async def _send_payment_info_messages(
     guests: list,
     total_regular_with_guests: int,
     total_discounted_with_guests: int,
+    full_name: str = "",
+    graduation_year: int | str | None = None,
 ):
     from botspot.core.dependency_manager import get_dependency_manager
+    from src.pay_url import build_pay_url
 
     deps = get_dependency_manager()
     await deps.bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -274,10 +277,21 @@ async def _send_payment_info_messages(
 
     await asyncio.sleep(3)
 
+    # Same total the user is told to pay (early-bird + guests when applicable).
+    pay_amount = (
+        total_discounted_with_guests if is_early else total_regular_with_guests
+    )
+    pay_url = build_pay_url(
+        app.settings.payment_site_base_url,
+        pay_amount,
+        full_name=full_name or "",
+        graduation_year=graduation_year,
+    )
     payment_msg_part3 = templates.render(
         event,
         "payment_details",
         {
+            "pay_url": pay_url,
             "phone": app.settings.payment_phone_number,
             "name": app.settings.payment_name,
         },
@@ -753,6 +767,7 @@ async def process_payment(
         )
 
     if not skip_instructions:
+        full_name = (registration_data or {}).get("full_name", "") or ""
         await _send_payment_info_messages(
             message,
             city,
@@ -763,6 +778,8 @@ async def process_payment(
             guests,
             total_regular_with_guests,
             total_discounted_with_guests,
+            full_name=full_name,
+            graduation_year=graduation_year,
         )
 
     choices = {

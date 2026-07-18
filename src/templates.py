@@ -83,13 +83,18 @@ TEMPLATE_SPECS: Dict[str, TemplateSpec] = {
     "payment_details": TemplateSpec(
         key="payment_details",
         title="Оплата: реквизиты",
-        placeholders=frozenset({"phone", "name"}),
+        placeholders=frozenset({"pay_url", "phone", "name"}),
         default=dedent(
             """
-            Реквизиты для оплаты:
+            Оплатить взнос на сайте (удобно картой):
+            {pay_url}
+
+            Запасной вариант — перевод по номеру:
             В Сбербанк по номеру телефона
             Номер телефона - {phone}
             Получатель - {name}
+
+            После оплаты отправьте скриншот подтверждения в этот чат.
             """
         ),
     ),
