@@ -33,9 +33,11 @@ def build_pay_url(
     full_name: str = "",
     graduation_year: Optional[Union[int, str]] = None,
 ) -> str:
-    """Return `{base}/donate?amount=…&frequency=once&name=…&surname=…&graduation_year=…`.
+    """Return `{base}/donate?amount=…&frequency=once&no_upsell=1&name=…&surname=…&graduation_year=…`.
 
     Amount must be the same total shown to the user (early-bird + guests included).
+    no_upsell=1 tells the site not to prompt converting the one-off event fee
+    into a monthly school subscription.
     Cyrillic is URL-encoded via urlencode.
     """
     base = (base_url or "").strip().rstrip("/")
@@ -46,6 +48,8 @@ def build_pay_url(
     params = {
         "amount": str(int(amount)),
         "frequency": "once",
+        # Event contribution stays one-off — do not upsell monthly support.
+        "no_upsell": "1",
         "name": name,
         "surname": surname,
     }

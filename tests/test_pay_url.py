@@ -42,11 +42,18 @@ class TestBuildPayUrl:
         q = parse_qs(parsed.query)
         assert q["amount"] == ["4500"]
         assert q["frequency"] == ["once"]
+        assert q["no_upsell"] == ["1"]
         assert q["name"] == ["Тест"]
         assert q["surname"] == ["Тестов"]
         assert q["graduation_year"] == ["2005"]
         # Raw query must percent-encode non-ASCII
         assert "%" in parsed.query
+
+    def test_always_sets_no_upsell_for_event_fees(self):
+        url = build_pay_url("https://example.test", 2500, full_name="А Б")
+        q = parse_qs(urlparse(url).query)
+        assert q["frequency"] == ["once"]
+        assert q["no_upsell"] == ["1"]
 
     def test_strips_trailing_slash_on_base(self):
         url = build_pay_url("https://146.school/", 146, full_name="А Б")
