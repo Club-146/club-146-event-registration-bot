@@ -19,6 +19,7 @@ from src import templates
 from src.app import App, GraduateType
 from src.router import is_admin, commands_menu, get_event_date_display
 from src.routers.admin import PaymentInfo
+from src.ticket_cards import send_paid_ticket_card
 from src.user_interactions import ask_user_raw, ask_user_choice, ask_user_choice_raw
 from botspot.utils import send_safe
 
@@ -1346,6 +1347,9 @@ async def confirm_payment_callback(callback_query: CallbackQuery, state: FSMCont
         payment_message += "Если у вас будет возможность, вы можете доплатить эту сумму позже, используя команду /pay."
 
     await send_safe(user_id, payment_message)
+
+    event = await app.get_event_for_registration(updated_registration)
+    await send_paid_ticket_card(user_id, updated_registration, event)
 
     if callback_query.message:
         user_info = f"{registration.get('username', user_id)} ({registration.get('full_name', 'Неизвестно')})"
