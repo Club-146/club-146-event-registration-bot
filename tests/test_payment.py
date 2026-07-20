@@ -602,11 +602,13 @@ async def test_send_payment_info_escapes_guest_name_for_telegram_html(
             total_discounted_with_guests=2300,
         )
 
-    guest_message = mock_send_safe.call_args_list[2].args[1]
+    # Price + guests are merged into the first message; how-to-pay is second.
+    first_message = mock_send_safe.call_args_list[0].args[1]
     assert (
-        "&lt;Тег&gt; &amp; &quot;двойная&quot; &#x27;одинарная&#x27;" in guest_message
+        "&lt;Тег&gt; &amp; &quot;двойная&quot; &#x27;одинарная&#x27;" in first_message
     )
-    assert "<Тег> & \"двойная\" 'одинарная'" not in guest_message
+    assert "<Тег> & \"двойная\" 'одинарная'" not in first_message
+    assert len(mock_send_safe.call_args_list) == 2
 
 
 def test_build_user_info_text_teacher():

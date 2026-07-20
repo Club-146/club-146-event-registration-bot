@@ -1998,7 +1998,7 @@ async def start_handler(message: Message, state: FSMContext, app: App):
                 state=state,
             )
             if want_register:
-                existing_registration = await app.get_user_registration(
+                existing_registration = await app.get_profile_for_reuse(
                     message.from_user.id
                 )
                 await register_user(
@@ -2013,7 +2013,8 @@ async def start_handler(message: Message, state: FSMContext, app: App):
     if active_registrations:
         await handle_registered_user(message, state, active_registrations[0], app)
     else:
-        existing_registration = await app.get_user_registration(message.from_user.id)
+        # Soft-deleted (e.g. «too expensive») still prefill name/year on re-register.
+        existing_registration = await app.get_profile_for_reuse(message.from_user.id)
         if len(upcoming_events) == 1:
             await _show_single_event_welcome(
                 message, state, app, upcoming_events[0], existing_registration

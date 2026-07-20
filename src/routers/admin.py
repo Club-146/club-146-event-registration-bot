@@ -62,6 +62,8 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
             choices={
                 "manage_events": "Управление встречами",
                 "register_payment": "Зарегистрировать оплату (за другого участника)",
+                "discretionary": "Скидка / бесплатный вход (решение Марии)",
+                "payment_reminders": "Напоминания об оплате (D-4 / D-2)",
                 "export": "Экспортировать данные",
             },
             state=state,
@@ -104,6 +106,10 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
         await manage_events_handler(message, state, app=app)
     elif response == "register_payment":
         await admin_register_payment(message, state, app)
+    elif response == "discretionary":
+        await admin_discretionary_payment(message, state, app)
+    elif response == "payment_reminders":
+        await admin_run_payment_reminders(message, app)
     elif response == "export":
         await export_handler(message, state, app=app)
     elif response == "notify_users":
@@ -288,43 +294,169 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
     if amount is None:
         return
 
-    if target_user_id:
-        await app.update_payment_status(
-            user_id=int(target_user_id),
-            event_id=selected,
-            status="confirmed",
-            payment_amount=amount,
-            admin_id=message.from_user.id if message.from_user else None,
-            admin_username=message.from_user.username if message.from_user else None,
-        )
-
-        # Notify the user
-        try:
-            from botspot.core.dependency_manager import get_dependency_manager
-
-            bot = get_dependency_manager().bot
-            await bot.send_message(
-                int(target_user_id),
-                f"Ваша оплата {amount}₽ подтверждена администратором. Спасибо!\n"
-                "Именной билет отправляем следующим сообщением. "
-                "Если он не появится, откройте /status.",
-            )
-        except Exception as e:
-            logger.warning(f"Could not notify user {target_user_id}: {e}")
-
-        await _send_admin_confirmed_ticket(app, int(target_user_id), selected)
-    else:
-        # No user_id — update by registration _id
-        await app.collection.update_one(
-            {"_id": reg["_id"]},
-            {"$set": {"payment_status": "confirmed", "payment_amount": amount}},
-        )
-
+    await _apply_admin_confirmed_payment(
+        app,
+        message,
+        reg=reg,
+        target_user_id=target_user_id,
+        target_name=target_name,
+        event_id=selected,
+        amount=amount,
+        admin_comment=None,
+        user_note=(
+            f"Ваша оплата {amount}₽ подтверждена администратором. Спасибо!\n"
+            "Именной билет отправляем следующим сообщением. "
+            "Если он не появится, откройте /status."
+        ),
+    )
     await send_safe(
         chat_id,
         f"Оплата {amount}₽ подтверждена для {target_name}.",
     )
     await app.export_registered_users_to_google_sheets()
+
+
+async def _apply_admin_confirmed_payment(
+    app: App,
+    message: Message,
+    *,
+    reg: dict,
+    target_user_id,
+    target_name: str,
+    event_id: str,
+    amount: int,
+    admin_comment: Optional[str],
+    user_note: str,
+) -> None:
+    if target_user_id:
+        kwargs = dict(
+            user_id=int(target_user_id),
+            event_id=event_id,
+            status="confirmed",
+            payment_amount=amount,
+            admin_id=message.from_user.id if message.from_user else None,
+            admin_username=message.from_user.username if message.from_user else None,
+        )
+        if admin_comment:
+            kwargs["admin_comment"] = admin_comment
+        await app.update_payment_status(**kwargs)
+        try:
+            from botspot.core.dependency_manager import get_dependency_manager
+
+            bot = get_dependency_manager().bot
+            await bot.send_message(int(target_user_id), user_note)
+        except Exception as e:
+            logger.warning(f"Could not notify user {target_user_id}: {e}")
+        await _send_admin_confirmed_ticket(app, int(target_user_id), event_id)
+    else:
+        from datetime import datetime
+
+        update = {
+            "payment_status": "confirmed",
+            "payment_amount": amount,
+            "payment_verified_at": datetime.now().isoformat(),
+        }
+        if admin_comment:
+            update["admin_comment"] = admin_comment
+        await app.collection.update_one({"_id": reg["_id"]}, {"$set": update})
+
+
+async def admin_discretionary_payment(
+    message: Message, state: FSMContext, app: App
+) -> None:
+    """Maria/admin: free entry or custom discounted amount for one registrant."""
+    chat_id = message.chat.id
+    selected = await _select_event_for_payment(chat_id, state, app)
+    if not selected:
+        return
+
+    user_result = await _select_unpaid_user(chat_id, state, app, selected)
+    if not user_result:
+        return
+    reg, target_user_id, target_name = user_result
+
+    mode = await ask_user_choice(
+        chat_id,
+        f"Участник: {target_name}\n"
+        "Решение по взносу (скидка / бесплатно — на усмотрение Марии):",
+        choices={
+            "free": "Бесплатный вход (0 ₽, confirmed)",
+            "discount": "Своя сумма (скидка) → confirmed",
+            "cancel": "Отмена",
+        },
+        state=state,
+        timeout=None,
+    )
+    if mode in (None, "cancel"):
+        await send_safe(chat_id, "Отменено.")
+        return
+
+    if mode == "free":
+        amount = 0
+        comment = "discretionary_free"
+        user_note = (
+            "Для вас вход на встречу подтверждён без оплаты "
+            "(решение организаторов). Спасибо, что с нами!\n"
+            "Именной билет — следующим сообщением (или /status)."
+        )
+    else:
+        amount = await _confirm_payment_amount(
+            chat_id, state, f"{target_name} (скидочная сумма)"
+        )
+        if amount is None:
+            return
+        comment = f"discretionary_discount:{amount}"
+        user_note = (
+            f"Ваш взнос зафиксирован как {amount}₽ "
+            f"(индивидуальное решение организаторов). Спасибо!\n"
+            "Именной билет — следующим сообщением (или /status)."
+        )
+
+    await _apply_admin_confirmed_payment(
+        app,
+        message,
+        reg=reg,
+        target_user_id=target_user_id,
+        target_name=target_name,
+        event_id=selected,
+        amount=amount,
+        admin_comment=comment,
+        user_note=user_note,
+    )
+    await send_safe(
+        chat_id,
+        f"Готово: {target_name} — "
+        f"{'бесплатно' if amount == 0 else f'{amount}₽ (скидка)'}, статус confirmed.",
+    )
+    await app.export_registered_users_to_google_sheets()
+
+
+async def admin_run_payment_reminders(message: Message, app: App) -> None:
+    """Run D-4 / D-2 payment reminder scan (idempotent flags on registrations)."""
+    from botspot.core.dependency_manager import get_dependency_manager
+    from src.payment_reminders import send_payment_reminders
+
+    chat_id = message.chat.id
+    await send_safe(
+        chat_id,
+        "Запускаю проверку напоминаний (D-4 еда / D-2 бейдж)…",
+    )
+    try:
+        bot = get_dependency_manager().bot
+        stats = await send_payment_reminders(app, bot, dry_run=False)
+    except Exception as e:
+        logger.exception("payment reminders failed")
+        await send_safe(chat_id, f"Ошибка: {e}")
+        return
+    await send_safe(
+        chat_id,
+        "Напоминания:\n"
+        f"• событий в окне D-4/D-2: {stats['events']}\n"
+        f"• отправлено D-4: {stats['d4']}\n"
+        f"• отправлено D-2: {stats['d2']}\n"
+        f"• пропущено (уже слали / нет user_id): {stats['skipped']}\n"
+        f"• ошибок: {stats['errors']}",
+    )
 
 
 @commands_menu.add_command(
