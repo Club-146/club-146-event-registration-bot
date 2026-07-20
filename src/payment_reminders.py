@@ -3,6 +3,7 @@
 Control state lives in Mongo collection ``payment_reminder_controls``
 (one doc per event_id + kind). Per-user send flags stay on registrations.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -138,9 +139,7 @@ def _eligible_events(events: list[dict]) -> list[dict]:
     return out
 
 
-async def build_reminder_batch(
-    app, event: dict, kind: str
-) -> tuple[list[dict], str]:
+async def build_reminder_batch(app, event: dict, kind: str) -> tuple[list[dict], str]:
     """Return (unpaid regs not yet messaged, message text)."""
     city = event.get("city", "городе")
     text = reminder_message(kind, event, city)
@@ -175,9 +174,7 @@ def format_admin_preview(
     if len(targets) > 40:
         more = f"\n… и ещё {len(targets) - 40}"
     pause_line = (
-        "⏸ <b>ПАУЗА</b> — авто-отправка не пойдёт, пока не снимете.\n"
-        if paused
-        else ""
+        "⏸ <b>ПАУЗА</b> — авто-отправка не пойдёт, пока не снимете.\n" if paused else ""
     )
     return (
         f"📋 <b>Завтра авто-напоминание</b> {label}\n"
@@ -190,6 +187,90 @@ def format_admin_preview(
         "Админ → Управление → Напоминания об оплате: "
         "пауза / снять паузу / отправить сейчас."
     )
+
+
+def _kinds_for_event(
+    event: dict,
+    *,
+    now: datetime,
+    force_kind: Optional[str],
+    only_due_today: bool,
+) -> list[str]:
+    if force_kind:
+        return [force_kind]
+    if only_due_today:
+        k = reminder_kind_for_event(event, now)
+        return [k] if k else []
+    return []
+
+
+async def _deliver_batch(
+    app,
+    bot,
+    *,
+    targets: list[dict],
+    text: str,
+    kind: str,
+    now: datetime,
+    dry_run: bool,
+    stats: dict[str, Any],
+) -> None:
+    flag = KIND_FLAG[kind]
+    for reg in targets:
+        user_id = reg.get("user_id")
+        if dry_run:
+            stats[kind] += 1
+            continue
+        try:
+            await bot.send_message(int(user_id), text)
+            await app.collection.update_one(
+                {"_id": reg["_id"]},
+                {"$set": {flag: True, f"{flag}_at": now.isoformat()}},
+            )
+            stats[kind] += 1
+        except Exception as e:
+            stats["errors"] += 1
+            logger.warning(f"payment reminder {kind} failed for user {user_id}: {e}")
+
+
+async def _send_kind_for_event(
+    app,
+    bot,
+    event: dict,
+    kind: str,
+    *,
+    now: datetime,
+    dry_run: bool,
+    respect_pause: bool,
+    force_kind: Optional[str],
+    stats: dict[str, Any],
+) -> None:
+    eid = _event_id(event)
+    if respect_pause:
+        ctrl = await get_control(app, eid, kind)
+        if ctrl.get("paused"):
+            stats["paused"] += 1
+            logger.info(f"reminder {kind} paused for event {eid}")
+            return
+
+    stats["events"] += 1
+    targets, text = await build_reminder_batch(app, event, kind)
+    if not targets:
+        stats["skipped"] += 1
+        return
+
+    await _deliver_batch(
+        app,
+        bot,
+        targets=targets,
+        text=text,
+        kind=kind,
+        now=now,
+        dry_run=dry_run,
+        stats=stats,
+    )
+    if not dry_run and not force_kind:
+        await mark_auto_send_completed(app, eid, kind)
 
 
 async def send_payment_reminders(
@@ -218,55 +299,24 @@ async def send_payment_reminders(
         "paused": 0,
     }
 
-    events = _eligible_events(await app.get_all_events())
-    for event in events:
+    for event in _eligible_events(await app.get_all_events()):
         eid = _event_id(event)
         if force_event_id and eid != force_event_id:
             continue
-
-        if force_kind:
-            kinds = [force_kind]
-        elif only_due_today:
-            k = reminder_kind_for_event(event, now)
-            kinds = [k] if k else []
-        else:
-            kinds = []
-
-        for kind in kinds:
-            if respect_pause:
-                ctrl = await get_control(app, eid, kind)
-                if ctrl.get("paused"):
-                    stats["paused"] += 1
-                    logger.info(f"reminder {kind} paused for event {eid}")
-                    continue
-
-            stats["events"] += 1
-            targets, text = await build_reminder_batch(app, event, kind)
-            flag = KIND_FLAG[kind]
-            if not targets:
-                stats["skipped"] += 1
-                continue
-
-            for reg in targets:
-                user_id = reg.get("user_id")
-                if dry_run:
-                    stats[kind] += 1
-                    continue
-                try:
-                    await bot.send_message(int(user_id), text)
-                    await app.collection.update_one(
-                        {"_id": reg["_id"]},
-                        {"$set": {flag: True, f"{flag}_at": now.isoformat()}},
-                    )
-                    stats[kind] += 1
-                except Exception as e:
-                    stats["errors"] += 1
-                    logger.warning(
-                        f"payment reminder {kind} failed for user {user_id}: {e}"
-                    )
-
-            if not dry_run and not force_kind:
-                await mark_auto_send_completed(app, eid, kind)
+        for kind in _kinds_for_event(
+            event, now=now, force_kind=force_kind, only_due_today=only_due_today
+        ):
+            await _send_kind_for_event(
+                app,
+                bot,
+                event,
+                kind,
+                now=now,
+                dry_run=dry_run,
+                respect_pause=respect_pause,
+                force_kind=force_kind,
+                stats=stats,
+            )
 
     return stats
 

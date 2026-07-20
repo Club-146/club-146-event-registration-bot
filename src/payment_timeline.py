@@ -4,6 +4,7 @@ Deadlines are at 06:00 on the calendar day N days before the event date
 (buffer: “before six in the morning”). Timezone-naive datetimes are treated
 as local wall time of the stored event date.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

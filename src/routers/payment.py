@@ -458,7 +458,9 @@ async def _handle_too_expensive(
                         "events",
                     )
                 except Exception as e:
-                    logger.warning(f"Could not log volunteer interest to events chat: {e}")
+                    logger.warning(
+                        f"Could not log volunteer interest to events chat: {e}"
+                    )
                 await send_safe(
                     message.chat.id,
                     "Отметили интерес. Напишите @mariikors — она решает "

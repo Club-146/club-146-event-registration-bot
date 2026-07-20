@@ -471,7 +471,9 @@ async def _admin_reminders_show_plan(message: Message, app: App) -> None:
 
     plan = await list_upcoming_reminder_plan(app, days_ahead=14)
     if not plan:
-        await send_safe(message.chat.id, "В ближайшие 14 дней напоминаний не запланировано.")
+        await send_safe(
+            message.chat.id, "В ближайшие 14 дней напоминаний не запланировано."
+        )
         return
     lines = ["📅 Ближайшие авто-напоминания:\n"]
     for row in plan:
