@@ -78,8 +78,8 @@ class AppSettings(BaseSettings):
     events_chat_id: int
     payment_phone_number: str
     payment_name: str
-    # Base URL for personal /donate pay links (staging by default; prod flip later).
-    payment_site_base_url: str = "https://staging.146.school.calmmage.com"
+    # Personal /donate pay links. Prod default; override on Coolify dev if needed.
+    payment_site_base_url: str = "https://146.school"
 
     delay_messages: bool = True
 
