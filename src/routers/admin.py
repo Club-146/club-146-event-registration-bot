@@ -1,6 +1,6 @@
 import base64
 import json
-from typing import Optional
+from typing import Mapping, Optional
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -12,6 +12,7 @@ from litellm import acompletion
 from loguru import logger
 from pydantic import BaseModel
 from src.app import App
+from src.ticket_cards import send_paid_ticket_card
 from botspot import commands_menu
 from botspot.components.qol.bot_commands_menu import Visibility
 from src.user_interactions import ask_user_choice, ask_user_raw
@@ -247,6 +248,29 @@ async def _confirm_payment_amount(
         return None
 
 
+async def _send_admin_confirmed_ticket(
+    app: App, target_user_id: int, event_id: str
+) -> None:
+    """Re-read authoritative state and attempt ticket delivery without blocking payment."""
+
+    try:
+        registration = await app.collection.find_one(
+            {"user_id": target_user_id, "event_id": event_id}
+        )
+        if not isinstance(registration, Mapping):
+            logger.warning(
+                f"Could not re-read registration for ticket delivery: "
+                f"user={target_user_id}, event={event_id}"
+            )
+            return
+        event = await app.get_event_for_registration(registration)
+        await send_paid_ticket_card(target_user_id, registration, event)
+    except Exception as e:
+        logger.warning(
+            f"Could not deliver confirmed ticket for user {target_user_id}: {e}"
+        )
+
+
 async def admin_register_payment(message: Message, state: FSMContext, app: App):
     """Admin flow: select event → pick unpaid user → confirm payment."""
     chat_id = message.chat.id
@@ -282,10 +306,13 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
             await bot.send_message(
                 int(target_user_id),
                 f"Ваша оплата {amount}₽ подтверждена администратором. Спасибо!\n"
-                "Именной билет доступен по команде /status.",
+                "Именной билет отправляем следующим сообщением. "
+                "Если он не появится, откройте /status.",
             )
         except Exception as e:
             logger.warning(f"Could not notify user {target_user_id}: {e}")
+
+        await _send_admin_confirmed_ticket(app, int(target_user_id), selected)
     else:
         # No user_id — update by registration _id
         await app.collection.update_one(

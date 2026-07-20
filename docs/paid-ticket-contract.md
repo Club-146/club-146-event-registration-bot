@@ -21,7 +21,7 @@ must return these fields:
 {
   "schema_version": 1,
   "payment_status": "confirmed",
-  "payment_kind": "event_attendance_donation",
+  "payment_kind": "event_attendance_payment",
   "bot_registration_id": "Mongo registered_users._id",
   "telegram_user_id": 123456789,
   "bot_event_id": "Mongo events._id",
@@ -70,6 +70,10 @@ Bot validation before writing `confirmed`:
    prefers it over the transitional visual code.
 7. Every `ticket_verification_url` must be HTTPS and contain a signed, revocable,
    non-personal token. Add it as a QR code in a later additive slice.
+8. `payment_kind` remains the accounting-neutral `event_attendance_payment`.
+   Petr calls this a donation in user-facing copy, but it must not enter generic
+   donation, endowment, or fundraising totals until Club 146 accounting confirms
+   its classification.
 
 The intent-creation request from bot to website needs the same three binding
 IDs (`bot_registration_id`, `telegram_user_id`, `bot_event_id`),
