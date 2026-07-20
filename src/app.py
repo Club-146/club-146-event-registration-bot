@@ -126,7 +126,7 @@ class FeedbackData(BaseModel):
 
 
 class App:
-    name = "146 Meetup Register Bot"
+    name = "146 Events Register Bot"
 
     registration_collection_name = "registered_users"
     event_logs_collection_name = "event_logs"
