@@ -97,6 +97,36 @@ class UserInputManager:
 input_manager = UserInputManager()
 
 
+async def _cleanup_prompt_messages(
+    sent_message: Message,
+    request: "PendingRequest",
+    *,
+    cleanup: bool,
+) -> None:
+    if cleanup:
+        await sent_message.delete()
+        if request.raw_response:
+            await request.raw_response.delete()
+    elif sent_message.reply_markup:
+        await sent_message.edit_text(text=sent_message.text or "", reply_markup=None)
+
+
+async def _handle_ask_timeout(
+    sent_message: Message,
+    question: str,
+    *,
+    notify_on_timeout: bool,
+    default_choice: Optional[str],
+) -> Optional[str]:
+    if notify_on_timeout:
+        if default_choice is not None:
+            question += f"\n\n⏰ Auto-selected: {default_choice}"
+        else:
+            question += "\n\n⏰ No response received within the time limit."
+        await sent_message.edit_text(question)
+    return default_choice
+
+
 async def _ask_user_base(
     chat_id: int,
     question: str,
@@ -115,18 +145,15 @@ async def _ask_user_base(
 
     if not question or question.strip() == "":
         raise ValueError("Message text cannot be empty")
-
-    deps = get_dependency_manager()
-    bot: Bot = deps.bot
-
-    handler_id = f"ask_{datetime.now().timestamp()}"
-
     if default_choice is not None and return_raw:
         raise ValueError("Cannot return default choice when return_raw is True")
 
+    deps = get_dependency_manager()
+    bot: Bot = deps.bot
+    handler_id = f"ask_{datetime.now().timestamp()}"
+
     await state.set_state(UserInputState.waiting)
     await state.update_data(handler_id=handler_id)
-
     request = input_manager.add_request(
         chat_id,
         handler_id,
@@ -148,28 +175,17 @@ async def _ask_user_base(
 
     try:
         await asyncio.wait_for(request.event.wait(), timeout=timeout)
-        if cleanup:
-            await sent_message.delete()
-            if request.raw_response:
-                await request.raw_response.delete()
-        elif sent_message.reply_markup:
-            await sent_message.edit_text(
-                text=sent_message.text or "", reply_markup=None
-            )
-
-        return (
-            request.raw_response
-            if (return_raw and request.raw_response is not None)
-            else request.response
-        )
+        await _cleanup_prompt_messages(sent_message, request, cleanup=cleanup)
+        if return_raw and request.raw_response is not None:
+            return request.raw_response
+        return request.response
     except asyncio.TimeoutError:
-        if notify_on_timeout:
-            if default_choice is not None:
-                question += f"\n\n⏰ Auto-selected: {default_choice}"
-            else:
-                question += "\n\n⏰ No response received within the time limit."
-            await sent_message.edit_text(question)
-        return default_choice
+        return await _handle_ask_timeout(
+            sent_message,
+            question,
+            notify_on_timeout=notify_on_timeout,
+            default_choice=default_choice,
+        )
     finally:
         input_manager.remove_request(chat_id, handler_id)
         await state.clear()
