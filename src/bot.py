@@ -48,6 +48,7 @@ def main(debug=False) -> None:
 
     # Run database fix on startup
     dp.startup.register(app.startup)
+    dp.shutdown.register(app.shutdown)
 
     # Setup dispatcher with our components
     bm.setup_dispatcher(dp)
