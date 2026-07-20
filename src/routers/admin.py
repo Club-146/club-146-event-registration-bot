@@ -32,74 +32,59 @@ router = Router()
 # Helper function for calculating median
 
 
-async def admin_handler(message: Message, state: FSMContext, app: App):
+_ADMIN_SUBMENUS = {
+    "management": (
+        "Управление:",
+        {
+            "manage_events": "Управление встречами",
+            "register_payment": "Зарегистрировать оплату (за другого участника)",
+            "discretionary": "Скидка / бесплатный вход (решение Марии)",
+            "payment_reminders": "Напоминания об оплате (D-4 / D-2)",
+            "export": "Экспортировать данные",
+        },
+    ),
+    "communication": (
+        "Коммуникации:",
+        {
+            "notify_users": "Рассылка пользователям",
+            "announce_season": "Анонс нового сезона встреч",
+        },
+    ),
+    "stats": (
+        "Статистика и аналитика:",
+        {
+            "view_stats": "Статистика (подробно)",
+            "view_simple_stats": "Статистика (кратко)",
+            "view_year_stats": "По годам выпуска",
+            "five_year_stats": "По пятилеткам выпуска",
+            "payment_stats": "Диаграмма оплат",
+        },
+    ),
+}
+
+
+async def _resolve_admin_submenu(
+    chat_id: int, state: FSMContext, response: Optional[str]
+) -> Optional[str]:
+    if response not in _ADMIN_SUBMENUS:
+        return response
+    title, choices = _ADMIN_SUBMENUS[response]
+    return await ask_user_choice(
+        chat_id, title, choices=choices, state=state, timeout=None
+    )
+
+
+async def _dispatch_admin_action(
+    message: Message, state: FSMContext, app: App, response: Optional[str]
+) -> None:
     from src.routers.stats import (
-        show_stats,
-        show_simple_stats,
-        show_year_stats,
         show_five_year_stats,
         show_payment_stats,
+        show_simple_stats,
+        show_stats,
+        show_year_stats,
     )
 
-    response = await ask_user_choice(
-        message.chat.id,
-        "Вы администратор бота. Что вы хотите сделать?",
-        choices={
-            "register": "Протестировать бота (обычный сценарий)",
-            "management": "Управление",
-            "communication": "Коммуникации",
-            "stats": "Статистика и аналитика",
-        },
-        state=state,
-        timeout=None,
-    )
-
-    # -- Management submenu --
-    if response == "management":
-        response = await ask_user_choice(
-            message.chat.id,
-            "Управление:",
-            choices={
-                "manage_events": "Управление встречами",
-                "register_payment": "Зарегистрировать оплату (за другого участника)",
-                "discretionary": "Скидка / бесплатный вход (решение Марии)",
-                "payment_reminders": "Напоминания об оплате (D-4 / D-2)",
-                "export": "Экспортировать данные",
-            },
-            state=state,
-            timeout=None,
-        )
-
-    # -- Communication submenu --
-    if response == "communication":
-        response = await ask_user_choice(
-            message.chat.id,
-            "Коммуникации:",
-            choices={
-                "notify_users": "Рассылка пользователям",
-                "announce_season": "Анонс нового сезона встреч",
-            },
-            state=state,
-            timeout=None,
-        )
-
-    # -- Stats submenu --
-    if response == "stats":
-        response = await ask_user_choice(
-            message.chat.id,
-            "Статистика и аналитика:",
-            choices={
-                "view_stats": "Статистика (подробно)",
-                "view_simple_stats": "Статистика (кратко)",
-                "view_year_stats": "По годам выпуска",
-                "five_year_stats": "По пятилеткам выпуска",
-                "payment_stats": "Диаграмма оплат",
-            },
-            state=state,
-            timeout=None,
-        )
-
-    # -- Dispatch --
     if response == "manage_events":
         from src.routers.events import manage_events_handler
 
@@ -130,6 +115,23 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
         await show_five_year_stats(message, app=app)
     elif response == "payment_stats":
         await show_payment_stats(message, app=app)
+
+
+async def admin_handler(message: Message, state: FSMContext, app: App):
+    response = await ask_user_choice(
+        message.chat.id,
+        "Вы администратор бота. Что вы хотите сделать?",
+        choices={
+            "register": "Протестировать бота (обычный сценарий)",
+            "management": "Управление",
+            "communication": "Коммуникации",
+            "stats": "Статистика и аналитика",
+        },
+        state=state,
+        timeout=None,
+    )
+    response = await _resolve_admin_submenu(message.chat.id, state, response)
+    await _dispatch_admin_action(message, state, app, response)
     # For "register", continue with normal flow
     return response
 
