@@ -281,7 +281,8 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
             bot = get_dependency_manager().bot
             await bot.send_message(
                 int(target_user_id),
-                f"Ваша оплата {amount}₽ подтверждена администратором. Спасибо!",
+                f"Ваша оплата {amount}₽ подтверждена администратором. Спасибо!\n"
+                "Именной билет доступен по команде /status.",
             )
         except Exception as e:
             logger.warning(f"Could not notify user {target_user_id}: {e}")
