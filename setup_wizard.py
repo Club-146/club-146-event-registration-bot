@@ -158,7 +158,7 @@ def setup_google_credentials():
 
 
 def main():
-    print("=== Meetup Bot Setup Wizard ===")
+    print("=== 146 Events Bot Setup Wizard ===")
     print()
 
     env = _load_env()

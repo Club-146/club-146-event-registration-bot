@@ -13,4 +13,4 @@ One sweep from a clean `dev` with commits ahead of `main`:
 make release-prod
 ```
 
-Prod pay links: set Coolify env `PAYMENT_SITE_BASE_URL=https://146.school` (code default is staging).
+Pay links default to `https://146.school`. Coolify **dev** may set `PAYMENT_SITE_BASE_URL=https://staging.146.school.calmmage.com`.

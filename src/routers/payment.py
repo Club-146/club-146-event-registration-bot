@@ -1,4 +1,4 @@
-"""Payment router for the 146 Meetup Register Bot."""
+"""Payment router for the 146 Events Register Bot."""
 
 import asyncio
 from html import escape

@@ -96,7 +96,7 @@ async def _append_log(user_id: int, log_msg) -> None:
 
 
 async def _format_multi_reg_info(registrations: List[Dict], app: App) -> str:
-    info_text = "Вы зарегистрированы на встречи выпускников в нескольких городах:\n\n"
+    info_text = "Вы зарегистрированы на мероприятия 146 в нескольких городах:\n\n"
     for reg in registrations:
         city = reg["target_city"]
         event = await app.get_event_for_registration(reg)
@@ -138,7 +138,7 @@ async def _format_single_reg_info(reg: Dict, app: App) -> str:
 
     info_text = dedent(
         f"""
-        Вы зарегистрированы на встречу выпускников:
+        Вы зарегистрированы на мероприятие:
 
         ФИО: {reg["full_name"]}
         """
@@ -183,7 +183,7 @@ async def _show_past_events_history(message: Message, app: App, user_id: int):
     user_regs = await app.get_user_registrations(user_id)
     user_event_ids = {reg.get("event_id") for reg in user_regs}
 
-    info_text = "📅 История встреч выпускников:\n\n"
+    info_text = "📅 История мероприятий:\n\n"
     for event in past_events:
         eid = str(event["_id"])
         date_str = get_event_date_display(event)
@@ -1126,7 +1126,7 @@ async def _finalize_free_registration(
 ):
     confirmation_msg = (
         f"Спасибо, {full_name}!\n"
-        f"Вы зарегистрированы на встречу выпускников школы 146 "
+        f"Вы зарегистрированы на мероприятие клуба 146 "
         f"в {city_prep} {date_display}. "
     )
     if guests:
@@ -1238,7 +1238,7 @@ async def _finalize_paid_registration(
 
     confirmation_msg = (
         f"Спасибо, {full_name}!\n"
-        f"Вы зарегистрированы на встречу выпускников школы 146 "
+        f"Вы зарегистрированы на мероприятие клуба 146 "
         f"в {city_prep} {date_display}. "
     )
     if guests:
@@ -1685,12 +1685,12 @@ async def info_handler(message: Message, state: FSMContext, app: App):
         message.from_user.username,
     )
 
-    info_text = "📅 <b>Информация о встречах выпускников 146</b>\n\n"
+    info_text = "📅 <b>Информация о мероприятиях 146</b>\n\n"
     active_events = await app.get_active_events()
 
     if not active_events:
         info_text += (
-            "Все встречи выпускников уже прошли. Спасибо, что были с нами! 🎓\n\n"
+            "Все текущие мероприятия уже прошли. Спасибо, что были с нами! 🎓\n\n"
         )
         info_text += "Следите за новостями в группе школы, чтобы не пропустить следующие встречи."
         await send_safe(message.chat.id, info_text, parse_mode="HTML")
@@ -1835,7 +1835,7 @@ async def _status_no_registrations(message: Message, app: App):
     if not upcoming:
         await send_safe(
             message.chat.id,
-            "Все встречи выпускников уже прошли. Спасибо, что были с нами! 🎓\n\n"
+            "Все текущие мероприятия уже прошли. Спасибо, что были с нами! 🎓\n\n"
             "Следите за новостями в группе школы, чтобы не пропустить следующие встречи.",
             reply_markup=ReplyKeyboardRemove(),
         )
@@ -1898,7 +1898,7 @@ async def _show_multi_event_welcome(
     upcoming_events,
     existing_registration,
 ):
-    events_text = "👋 Добро пожаловать!\n\nБлижайшие встречи выпускников:\n\n"
+    events_text = "👋 Добро пожаловать!\n\nБлижайшие мероприятия:\n\n"
     for event in upcoming_events:
         await send_event_image(
             message.chat.id,
