@@ -46,8 +46,16 @@ def main(debug=False) -> None:
     bm = BotManager(bot=bot)
     bm.settings.ask_user.enabled = False
 
-    # Run database fix on startup
-    dp.startup.register(app.startup)
+    async def on_startup() -> None:
+        await app.startup()
+        try:
+            from src.reminder_scheduler import start_reminder_scheduler
+
+            start_reminder_scheduler(app, bot)
+        except Exception:
+            logger.exception("Failed to start payment reminder scheduler")
+
+    dp.startup.register(on_startup)
 
     # Setup dispatcher with our components
     bm.setup_dispatcher(dp)

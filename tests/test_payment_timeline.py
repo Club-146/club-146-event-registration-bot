@@ -4,6 +4,7 @@ from datetime import date, datetime
 from src.payment_timeline import (
     BADGE_DAYS_BEFORE,
     FOOD_DAYS_BEFORE,
+    admin_preview_kinds_for_event,
     badge_deadline,
     food_deadline,
     pay_later_message,
@@ -67,3 +68,10 @@ def test_reminder_and_too_expensive_copy():
     cancel = too_expensive_cancel_message()
     assert "@mariikors" in cancel
     assert "волонт" in cancel.lower() or "Волонт" in cancel
+
+
+def test_admin_preview_is_day_before_send():
+    event = _event(date(2026, 8, 1))
+    # send d4 on 28 Jul → preview 27 Jul
+    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 27, 8)) == ["d4"]
+    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 28, 8)) == []

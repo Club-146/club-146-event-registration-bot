@@ -4,6 +4,7 @@ Deadlines are at 06:00 on the calendar day N days before the event date
 (buffer: “before six in the morning”). Timezone-naive datetimes are treated
 as local wall time of the stored event date.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +15,9 @@ from typing import Any, Optional
 FOOD_DAYS_BEFORE = 4
 BADGE_DAYS_BEFORE = 2
 DEADLINE_HOUR = 6  # 06:00
+
+# Admin gets a summary 1 calendar day before each user-facing reminder day.
+ADMIN_PREVIEW_DAYS_BEFORE_REMINDER = 1
 
 
 def _as_date(value: Any) -> Optional[date]:
@@ -35,7 +39,9 @@ def event_date(event: dict) -> Optional[date]:
     return _as_date(event.get("date"))
 
 
-def deadline_at(event: dict, days_before: int, hour: int = DEADLINE_HOUR) -> Optional[datetime]:
+def deadline_at(
+    event: dict, days_before: int, hour: int = DEADLINE_HOUR
+) -> Optional[datetime]:
     """Instant after which the “late” rule applies (06:00 on that morning)."""
     d = event_date(event)
     if d is None:
@@ -100,23 +106,47 @@ def pay_later_message(event: dict, now: Optional[datetime] = None) -> str:
     )
 
 
+def _deadline_for_kind(event: dict, kind: str) -> Optional[datetime]:
+    if kind == "d4":
+        return food_deadline(event)
+    if kind == "d2":
+        return badge_deadline(event)
+    raise ValueError(f"unknown reminder kind: {kind}")
+
+
 def reminder_kind_for_event(
     event: dict, now: Optional[datetime] = None
 ) -> Optional[str]:
     """Return ``d4`` or ``d2`` if *now* falls on that reminder calendar day.
 
     Reminder day = calendar day of the corresponding 06:00 deadline
-    (D-4 food planning day, D-2 badge day).
+    (D-4 food planning day, D-2 badge day). Prefer d4 if both somehow collide.
     """
     now = now or datetime.now()
+    today = now.date()
     food = food_deadline(event)
     badge = badge_deadline(event)
-    today = now.date()
     if food and today == food.date():
         return "d4"
     if badge and today == badge.date():
         return "d2"
     return None
+
+
+def admin_preview_kinds_for_event(
+    event: dict, now: Optional[datetime] = None
+) -> list[str]:
+    """Kinds whose user-reminder day is **tomorrow** (admin preview day)."""
+    now = now or datetime.now()
+    tomorrow = now.date() + timedelta(days=ADMIN_PREVIEW_DAYS_BEFORE_REMINDER)
+    kinds: list[str] = []
+    food = food_deadline(event)
+    badge = badge_deadline(event)
+    if food and tomorrow == food.date():
+        kinds.append("d4")
+    if badge and tomorrow == badge.date():
+        kinds.append("d2")
+    return kinds
 
 
 def reminder_message(kind: str, event: dict, city: str) -> str:
@@ -137,6 +167,14 @@ def reminder_message(kind: str, event: dict, city: str) -> str:
             "Оплатить: /pay. После оплаты пришлите скриншот в чат."
         )
     raise ValueError(f"unknown reminder kind: {kind}")
+
+
+def kind_label_ru(kind: str) -> str:
+    if kind == "d4":
+        return "D-4 (еда / 4 дня)"
+    if kind == "d2":
+        return "D-2 (бейдж / 2 дня)"
+    return kind
 
 
 VOLUNTEER_OPTIONS_TEXT = (
