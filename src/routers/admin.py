@@ -109,7 +109,7 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
     elif response == "discretionary":
         await admin_discretionary_payment(message, state, app)
     elif response == "payment_reminders":
-        await admin_run_payment_reminders(message, app)
+        await admin_payment_reminders_menu(message, state, app)
     elif response == "export":
         await export_handler(message, state, app=app)
     elif response == "notify_users":
@@ -431,31 +431,201 @@ async def admin_discretionary_payment(
     await app.export_registered_users_to_google_sheets()
 
 
-async def admin_run_payment_reminders(message: Message, app: App) -> None:
-    """Run D-4 / D-2 payment reminder scan (idempotent flags on registrations)."""
+async def admin_payment_reminders_menu(
+    message: Message, state: FSMContext, app: App
+) -> None:
+    """Admin tools: plan, pause/unpause, send now, force daily tick."""
+    chat_id = message.chat.id
+    action = await ask_user_choice(
+        chat_id,
+        "Напоминания об оплате (D-4 еда / D-2 бейдж).\n"
+        "Авто: ежедневно ~09:00 + hourly; за день — превью админам.",
+        choices={
+            "plan": "Расписание / превью ближайших",
+            "pause": "Пауза (не слать автоматически)",
+            "unpause": "Снять паузу",
+            "send_now": "Отправить сейчас (выбрать встречу)",
+            "tick": "Запустить тик сейчас (превью+должные)",
+            "cancel": "Назад",
+        },
+        state=state,
+        timeout=None,
+    )
+    if action in (None, "cancel"):
+        await send_safe(chat_id, "Ок.")
+        return
+    if action == "plan":
+        await _admin_reminders_show_plan(message, app)
+    elif action == "pause":
+        await _admin_reminders_set_pause(message, state, app, paused=True)
+    elif action == "unpause":
+        await _admin_reminders_set_pause(message, state, app, paused=False)
+    elif action == "send_now":
+        await _admin_reminders_send_now(message, state, app)
+    elif action == "tick":
+        await admin_run_payment_reminders(message, app)
+
+
+async def _admin_reminders_show_plan(message: Message, app: App) -> None:
+    from src.payment_reminders import list_upcoming_reminder_plan
+
+    plan = await list_upcoming_reminder_plan(app, days_ahead=14)
+    if not plan:
+        await send_safe(message.chat.id, "В ближайшие 14 дней напоминаний не запланировано.")
+        return
+    lines = ["📅 Ближайшие авто-напоминания:\n"]
+    for row in plan:
+        pause = " ⏸" if row["paused"] else ""
+        lines.append(
+            f"• {row['send_day']} {row['label']}{pause} — {row['city']}\n"
+            f"  превью админам: {row['preview_day']} · "
+            f"получателей ~{row['recipient_count']}\n"
+            f"  id={row['event_id'][:10]}…"
+        )
+    # First full text preview (so admins see copy)
+    first = plan[0]
+    lines.append("\n——— пример текста (первый в списке) ——-")
+    lines.append(first["text"])
+    await send_safe(message.chat.id, "\n".join(lines))
+
+
+async def _pick_event_and_kind(
+    chat_id: int, state: FSMContext, app: App, plan_only: bool = False
+) -> Optional[tuple[str, str, str]]:
+    """Returns (event_id, kind, city) or None."""
+    from src.payment_reminders import list_upcoming_reminder_plan
+    from src.payment_timeline import kind_label_ru
+
+    if plan_only:
+        plan = await list_upcoming_reminder_plan(app, days_ahead=30)
+        if not plan:
+            await send_safe(chat_id, "Нет предстоящих напоминаний.")
+            return None
+        choices = {}
+        for i, row in enumerate(plan):
+            key = f"{i}"
+            pause = " ⏸" if row["paused"] else ""
+            choices[key] = (
+                f"{row['send_day']} {row['label']}{pause} — {row['city']} "
+                f"({row['recipient_count']} чел.)"
+            )
+        choices["cancel"] = "Отмена"
+        pick = await ask_user_choice(
+            chat_id, "Выберите напоминание:", choices=choices, state=state, timeout=None
+        )
+        if pick in (None, "cancel"):
+            return None
+        row = plan[int(pick)]
+        return row["event_id"], row["kind"], row["city"]
+
+    # All non-archived events × kinds
+    selected = await _select_event_for_payment(chat_id, state, app)
+    if not selected:
+        return None
+    event = await app.get_event_by_id(selected)
+    city = (event or {}).get("city", "?")
+    kind = await ask_user_choice(
+        chat_id,
+        f"{city}: какой тип?",
+        choices={
+            "d4": kind_label_ru("d4"),
+            "d2": kind_label_ru("d2"),
+            "cancel": "Отмена",
+        },
+        state=state,
+        timeout=None,
+    )
+    if kind in (None, "cancel"):
+        return None
+    return selected, kind, city
+
+
+async def _admin_reminders_set_pause(
+    message: Message, state: FSMContext, app: App, *, paused: bool
+) -> None:
+    from src.payment_reminders import set_paused
+    from src.payment_timeline import kind_label_ru
+
+    pick = await _pick_event_and_kind(message.chat.id, state, app, plan_only=True)
+    if not pick:
+        await send_safe(message.chat.id, "Отменено.")
+        return
+    event_id, kind, city = pick
+    ctrl = await set_paused(app, event_id, kind, paused)
+    state_ru = "на паузе ⏸" if ctrl.get("paused") else "активно ▶"
+    await send_safe(
+        message.chat.id,
+        f"{city} · {kind_label_ru(kind)}: теперь <b>{state_ru}</b>.",
+    )
+
+
+async def _admin_reminders_send_now(
+    message: Message, state: FSMContext, app: App
+) -> None:
     from botspot.core.dependency_manager import get_dependency_manager
     from src.payment_reminders import send_payment_reminders
+    from src.payment_timeline import kind_label_ru
+
+    pick = await _pick_event_and_kind(message.chat.id, state, app, plan_only=False)
+    if not pick:
+        await send_safe(message.chat.id, "Отменено.")
+        return
+    event_id, kind, city = pick
+    confirm = await ask_user_choice(
+        message.chat.id,
+        f"Отправить <b>сейчас</b> {kind_label_ru(kind)} для {city} "
+        f"(только тем, кому ещё не слали; пауза игнорируется)?",
+        choices={"yes": "Да, отправить", "no": "Отмена"},
+        state=state,
+        timeout=None,
+    )
+    if confirm != "yes":
+        await send_safe(message.chat.id, "Отменено.")
+        return
+    bot = get_dependency_manager().bot
+    stats = await send_payment_reminders(
+        app,
+        bot,
+        force_event_id=event_id,
+        force_kind=kind,
+        respect_pause=False,
+        only_due_today=False,
+    )
+    await send_safe(
+        message.chat.id,
+        f"Отправлено сейчас ({kind_label_ru(kind)} / {city}):\n"
+        f"d4={stats['d4']} d2={stats['d2']} "
+        f"skipped={stats['skipped']} errors={stats['errors']}",
+    )
+
+
+async def admin_run_payment_reminders(message: Message, app: App) -> None:
+    """Force daily tick: admin previews + due user sends (respects pause)."""
+    from botspot.core.dependency_manager import get_dependency_manager
+    from src.payment_reminders import daily_reminder_tick
 
     chat_id = message.chat.id
     await send_safe(
         chat_id,
-        "Запускаю проверку напоминаний (D-4 еда / D-2 бейдж)…",
+        "Запускаю тик: превью «завтра» + рассылка должных на сегодня…",
     )
     try:
         bot = get_dependency_manager().bot
-        stats = await send_payment_reminders(app, bot, dry_run=False)
+        result = await daily_reminder_tick(app, bot)
     except Exception as e:
-        logger.exception("payment reminders failed")
+        logger.exception("payment reminders tick failed")
         await send_safe(chat_id, f"Ошибка: {e}")
         return
+    prev = result["preview"]
+    send = result["send"]
     await send_safe(
         chat_id,
-        "Напоминания:\n"
-        f"• событий в окне D-4/D-2: {stats['events']}\n"
-        f"• отправлено D-4: {stats['d4']}\n"
-        f"• отправлено D-2: {stats['d2']}\n"
-        f"• пропущено (уже слали / нет user_id): {stats['skipped']}\n"
-        f"• ошибок: {stats['errors']}",
+        "Тик готов.\n"
+        f"Превью админам: {prev.get('previews', 0)} "
+        f"(skip {prev.get('skipped', 0)}, err {prev.get('errors', 0)})\n"
+        f"Пользователям: d4={send.get('d4', 0)} d2={send.get('d2', 0)} "
+        f"paused={send.get('paused', 0)} skipped={send.get('skipped', 0)} "
+        f"errors={send.get('errors', 0)}",
     )
 
 
