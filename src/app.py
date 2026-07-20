@@ -503,6 +503,19 @@ class App:
         registrations = await cursor.to_list(length=1)
         return registrations[0] if registrations else None
 
+    async def get_profile_for_reuse(self, user_id: int) -> Optional[Dict]:
+        """Profile fields for re-registration: active reg first, else newest deleted.
+
+        Soft-deleted rows (e.g. «too expensive») keep full_name / year / letter so
+        the user does not retype the form.
+        """
+        active = await self.get_user_registration(user_id)
+        if active and active.get("full_name"):
+            return active
+        cursor = self.deleted_users.find({"user_id": user_id}).sort("_id", -1)
+        deleted = await cursor.to_list(length=1)
+        return deleted[0] if deleted else None
+
     async def delete_user_registration(
         self,
         user_id: int,

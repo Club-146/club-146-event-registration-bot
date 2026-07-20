@@ -216,21 +216,23 @@ async def _send_payment_info_messages(
     full_name: str = "",
     graduation_year: int | str | None = None,
 ):
+    """Send payment info in two user-visible messages (price+guests, then how to pay)."""
     from botspot.core.dependency_manager import get_dependency_manager
     from src.pay_url import build_pay_url
 
     deps = get_dependency_manager()
     await deps.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    await asyncio.sleep(3)
+    await asyncio.sleep(1)
 
     payment_formula = _build_payment_formula(event)
+    chunks: list[str] = []
 
     if graduate_type != GraduateType.NON_GRADUATE.value:
-        payment_msg_part1 = templates.render(
-            event, "payment_intro", {"city": city, "formula": payment_formula}
+        chunks.append(
+            templates.render(
+                event, "payment_intro", {"city": city, "formula": payment_formula}
+            ).strip()
         )
-        await send_safe(message.chat.id, payment_msg_part1)
-        await asyncio.sleep(5)
 
     price_label = (
         "Минимальный взнос для вас"
@@ -244,33 +246,35 @@ async def _send_payment_info_messages(
     if is_early:
         assert early_bird_deadline is not None
         deadline_display = early_bird_deadline.strftime("%d.%m")
-        payment_msg_part2 = templates.render(
-            event,
-            "payment_price_early",
-            {
-                "price_label": price_label,
-                "regular_amount": regular_amount,
-                "deadline": deadline_display,
-                "discount": early_bird_discount_amount,
-                "discounted_amount": discounted_amount,
-                "season": season,
-            },
+        chunks.append(
+            templates.render(
+                event,
+                "payment_price_early",
+                {
+                    "price_label": price_label,
+                    "regular_amount": regular_amount,
+                    "deadline": deadline_display,
+                    "discount": early_bird_discount_amount,
+                    "discounted_amount": discounted_amount,
+                    "season": season,
+                },
+            ).strip()
         )
     else:
-        payment_msg_part2 = templates.render(
-            event,
-            "payment_price_regular",
-            {
-                "price_label": price_label,
-                "regular_amount": regular_amount,
-                "season": season,
-            },
+        chunks.append(
+            templates.render(
+                event,
+                "payment_price_regular",
+                {
+                    "price_label": price_label,
+                    "regular_amount": regular_amount,
+                    "season": season,
+                },
+            ).strip()
         )
 
-    await send_safe(message.chat.id, payment_msg_part2)
-
     if guests:
-        guest_msg = f"\n👥 Гости ({len(guests)}):\n"
+        guest_msg = f"👥 Гости ({len(guests)}):\n"
         for i, g in enumerate(guests, 1):
             guest_name = escape(str(g["name"]), quote=True)
             guest_msg += f"  {i}. {guest_name} — {g['price']} руб.\n"
@@ -283,10 +287,10 @@ async def _send_payment_info_messages(
             guest_msg += (
                 f"\n💰 <b>Итого с гостями: {total_regular_with_guests} руб.</b>"
             )
-        await send_safe(message.chat.id, guest_msg)
-        await asyncio.sleep(2)
+        chunks.append(guest_msg.strip())
 
-    await asyncio.sleep(3)
+    await send_safe(message.chat.id, "\n\n".join(chunks))
+    await asyncio.sleep(1)
 
     # Same total the user is told to pay (early-bird + guests when applicable).
     pay_amount = total_discounted_with_guests if is_early else total_regular_with_guests
@@ -306,7 +310,7 @@ async def _send_payment_info_messages(
         },
     )
     await send_safe(message.chat.id, payment_msg_part3)
-    await asyncio.sleep(3)
+    await asyncio.sleep(1)
 
 
 async def _handle_pay_later(
@@ -319,10 +323,16 @@ async def _handle_pay_later(
     regular_amount: int,
     formula_amount: int,
     graduate_type: str,
+    event: dict | None = None,
 ):
+    from src.payment_timeline import pay_later_message
+
+    if event is None:
+        event = await app.get_event_by_id(event_id) or {}
+
     await send_safe(
         message.chat.id,
-        "Хорошо! Вы можете оплатить позже, используя команду /pay",
+        pay_later_message(event),
         reply_markup=ReplyKeyboardRemove(),
     )
     await app.log_registration_step(
@@ -346,7 +356,25 @@ async def _handle_pay_later(
         discounted_amount=discounted_amount,
         regular_amount=regular_amount,
         formula_amount=formula_amount,
+        payment_status="not paid",
     )
+    # Mark for reminder job (not yet reminded).
+    try:
+        coll = app.collection
+        update = coll.update_one(
+            {"user_id": user_id, "event_id": event_id},
+            {
+                "$set": {
+                    "pay_later_selected": True,
+                    "payment_reminder_d4_sent": False,
+                    "payment_reminder_d2_sent": False,
+                }
+            },
+        )
+        if hasattr(update, "__await__"):
+            await update
+    except Exception as e:
+        logger.warning(f"Could not set pay_later flags for {user_id}: {e}")
 
 
 async def _handle_too_expensive(
@@ -358,7 +386,10 @@ async def _handle_too_expensive(
     discounted_amount: int,
     regular_amount: int,
     graduate_type: str,
+    state: FSMContext | None = None,
 ):
+    from src.payment_timeline import too_expensive_cancel_message
+
     await app.log_registration_step(
         user_id=user_id,
         username=username,
@@ -384,13 +415,55 @@ async def _handle_too_expensive(
 
     if registration:
         full_name = registration.get("full_name", "Unknown")
-        await app.delete_user_registration(user_id, event_id)
+        # Soft-delete keeps the row in deleted_users so /start can reuse profile.
+        await app.delete_user_registration(
+            user_id, event_id, username=username, full_name=full_name
+        )
         await app.log_registration_canceled(user_id, username, full_name, city)
         await send_safe(
             message.chat.id,
-            "Понимаем! Ваша регистрация отменена. Если передумаете, вы всегда можете зарегистрироваться снова с помощью команды /start",
+            too_expensive_cancel_message(),
             reply_markup=ReplyKeyboardRemove(),
         )
+        if state is not None:
+            interest = await ask_user_choice(
+                message.chat.id,
+                "Хотите, чтобы мы отметили интерес к волонтёрству "
+                "(Мария @mariikors свяжется / учтёт)?",
+                choices={
+                    "volunteer_yes": "Да, интересно волонтёрство",
+                    "volunteer_no": "Нет, спасибо",
+                },
+                state=state,
+                timeout=300,
+            )
+            if interest == "volunteer_yes":
+                await app.save_event_log(
+                    "payment_action",
+                    {
+                        "action": "volunteer_interest_after_too_expensive",
+                        "city": city,
+                        "full_name": full_name,
+                        "amount": discounted_amount,
+                    },
+                    user_id,
+                    username,
+                )
+                try:
+                    await app.log_to_chat(
+                        f"🙋 Волонтёрский интерес (после «дорого»)\n"
+                        f"{full_name} (@{username or '—'})\n"
+                        f"user_id={user_id} · {city} · взнос был {discounted_amount}₽\n"
+                        f"→ @mariikors",
+                        "events",
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not log volunteer interest to events chat: {e}")
+                await send_safe(
+                    message.chat.id,
+                    "Отметили интерес. Напишите @mariikors — она решает "
+                    "скидку / бесплатный вход / задачи.",
+                )
     else:
         await send_safe(
             message.chat.id,
@@ -733,9 +806,12 @@ async def _handle_screenshot_upload(
     )
 
     if not (has_photo or has_pdf):
+        from src.payment_timeline import pay_later_message
+
+        event = await app.get_event_by_id(event_id) or {}
         await send_safe(
             message.chat.id,
-            "Хорошо! Вы можете оплатить позже, используя команду /pay",
+            pay_later_message(event),
             reply_markup=ReplyKeyboardRemove(),
         )
         await app.save_payment_info(
@@ -743,6 +819,7 @@ async def _handle_screenshot_upload(
             event_id=event_id,
             discounted_amount=discounted_amount,
             regular_amount=regular_amount,
+            payment_status="not paid",
         )
         return False
 
@@ -953,6 +1030,7 @@ async def process_payment(
                 regular_amount,
                 formula_amount,
                 graduate_type,
+                event=event,
             )
             return False
         if response == "too_expensive":
@@ -965,6 +1043,7 @@ async def process_payment(
                 discounted_amount,
                 regular_amount,
                 graduate_type,
+                state=state,
             )
             return False
 
