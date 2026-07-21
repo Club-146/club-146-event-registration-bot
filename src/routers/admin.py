@@ -1,6 +1,6 @@
 import base64
 import json
-from typing import Optional
+from typing import Mapping, Optional
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -12,6 +12,7 @@ from litellm import acompletion
 from loguru import logger
 from pydantic import BaseModel
 from src.app import App
+from src.ticket_cards import send_paid_ticket_card
 from botspot import commands_menu
 from botspot.components.qol.bot_commands_menu import Visibility
 from src.user_interactions import ask_user_choice, ask_user_raw
@@ -23,6 +24,19 @@ from botspot.utils.admin_filter import AdminFilter
 class PaymentInfo(BaseModel):
     amount: Optional[int]
     is_valid: bool  # Whether there's a clear payment amount in the document
+    # True if receipt looks like a transfer to Maria (name/phone from env).
+    # False → treat as website / card payment (CloudPayments, etc.).
+    paid_to_maria: bool = False
+    method_reason: Optional[str] = None  # short free-text evidence for admins/logs
+
+    @property
+    def payment_method(self) -> str:
+        """Canonical method key used elsewhere: on_site | to_maria."""
+        return "to_maria" if self.paid_to_maria else "on_site"
+
+
+# Sonnet: Haiku was cheaper but misclassified receipts; override via PAYMENT_PARSE_MODEL.
+DEFAULT_PAYMENT_PARSE_MODEL = "anthropic/claude-sonnet-4-6"
 
 
 router = Router()
@@ -31,78 +45,69 @@ router = Router()
 # Helper function for calculating median
 
 
-async def admin_handler(message: Message, state: FSMContext, app: App):
+_ADMIN_SUBMENUS = {
+    "management": (
+        "Управление:",
+        {
+            "manage_events": "Управление встречами",
+            "register_payment": "Зарегистрировать оплату (за другого участника)",
+            "discretionary": "Скидка / бесплатный вход (решение Марии)",
+            "payment_reminders": "Напоминания об оплате (D-4 / D-2)",
+            "export": "Экспортировать данные",
+        },
+    ),
+    "communication": (
+        "Коммуникации:",
+        {
+            "notify_users": "Рассылка пользователям",
+            "announce_season": "Анонс нового сезона встреч",
+        },
+    ),
+    "stats": (
+        "Статистика и аналитика:",
+        {
+            "view_stats": "Статистика (подробно)",
+            "view_simple_stats": "Статистика (кратко)",
+            "view_year_stats": "По годам выпуска",
+            "five_year_stats": "По пятилеткам выпуска",
+            "payment_stats": "Диаграмма оплат",
+        },
+    ),
+}
+
+
+async def _resolve_admin_submenu(
+    chat_id: int, state: FSMContext, response: Optional[str]
+) -> Optional[str]:
+    if response not in _ADMIN_SUBMENUS:
+        return response
+    title, choices = _ADMIN_SUBMENUS[response]
+    return await ask_user_choice(
+        chat_id, title, choices=choices, state=state, timeout=None
+    )
+
+
+async def _dispatch_admin_action(
+    message: Message, state: FSMContext, app: App, response: Optional[str]
+) -> None:
     from src.routers.stats import (
-        show_stats,
-        show_simple_stats,
-        show_year_stats,
         show_five_year_stats,
         show_payment_stats,
+        show_simple_stats,
+        show_stats,
+        show_year_stats,
     )
 
-    response = await ask_user_choice(
-        message.chat.id,
-        "Вы администратор бота. Что вы хотите сделать?",
-        choices={
-            "register": "Протестировать бота (обычный сценарий)",
-            "management": "Управление",
-            "communication": "Коммуникации",
-            "stats": "Статистика и аналитика",
-        },
-        state=state,
-        timeout=None,
-    )
-
-    # -- Management submenu --
-    if response == "management":
-        response = await ask_user_choice(
-            message.chat.id,
-            "Управление:",
-            choices={
-                "manage_events": "Управление встречами",
-                "register_payment": "Зарегистрировать оплату (за другого участника)",
-                "export": "Экспортировать данные",
-            },
-            state=state,
-            timeout=None,
-        )
-
-    # -- Communication submenu --
-    if response == "communication":
-        response = await ask_user_choice(
-            message.chat.id,
-            "Коммуникации:",
-            choices={
-                "notify_users": "Рассылка пользователям",
-                "announce_season": "Анонс нового сезона встреч",
-            },
-            state=state,
-            timeout=None,
-        )
-
-    # -- Stats submenu --
-    if response == "stats":
-        response = await ask_user_choice(
-            message.chat.id,
-            "Статистика и аналитика:",
-            choices={
-                "view_stats": "Статистика (подробно)",
-                "view_simple_stats": "Статистика (кратко)",
-                "view_year_stats": "По годам выпуска",
-                "five_year_stats": "По пятилеткам выпуска",
-                "payment_stats": "Диаграмма оплат",
-            },
-            state=state,
-            timeout=None,
-        )
-
-    # -- Dispatch --
     if response == "manage_events":
         from src.routers.events import manage_events_handler
 
         await manage_events_handler(message, state, app=app)
     elif response == "register_payment":
         await admin_register_payment(message, state, app)
+    elif response == "discretionary":
+        await admin_discretionary_payment(message, state, app)
+    elif response == "payment_reminders":
+        await admin_payment_reminders_menu(message, state, app)
     elif response == "export":
         await export_handler(message, state, app=app)
     elif response == "notify_users":
@@ -123,6 +128,23 @@ async def admin_handler(message: Message, state: FSMContext, app: App):
         await show_five_year_stats(message, app=app)
     elif response == "payment_stats":
         await show_payment_stats(message, app=app)
+
+
+async def admin_handler(message: Message, state: FSMContext, app: App):
+    response = await ask_user_choice(
+        message.chat.id,
+        "Вы администратор бота. Что вы хотите сделать?",
+        choices={
+            "register": "Протестировать бота (обычный сценарий)",
+            "management": "Управление",
+            "communication": "Коммуникации",
+            "stats": "Статистика и аналитика",
+        },
+        state=state,
+        timeout=None,
+    )
+    response = await _resolve_admin_submenu(message.chat.id, state, response)
+    await _dispatch_admin_action(message, state, app, response)
     # For "register", continue with normal flow
     return response
 
@@ -247,6 +269,29 @@ async def _confirm_payment_amount(
         return None
 
 
+async def _send_admin_confirmed_ticket(
+    app: App, target_user_id: int, event_id: str
+) -> None:
+    """Re-read authoritative state and attempt ticket delivery without blocking payment."""
+
+    try:
+        registration = await app.collection.find_one(
+            {"user_id": target_user_id, "event_id": event_id}
+        )
+        if not isinstance(registration, Mapping):
+            logger.warning(
+                f"Could not re-read registration for ticket delivery: "
+                f"user={target_user_id}, event={event_id}"
+            )
+            return
+        event = await app.get_event_for_registration(registration)
+        await send_paid_ticket_card(target_user_id, registration, event)
+    except Exception as e:
+        logger.warning(
+            f"Could not deliver confirmed ticket for user {target_user_id}: {e}"
+        )
+
+
 async def admin_register_payment(message: Message, state: FSMContext, app: App):
     """Admin flow: select event → pick unpaid user → confirm payment."""
     chat_id = message.chat.id
@@ -264,39 +309,341 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
     if amount is None:
         return
 
-    if target_user_id:
-        await app.update_payment_status(
-            user_id=int(target_user_id),
-            event_id=selected,
-            status="confirmed",
-            payment_amount=amount,
-            admin_id=message.from_user.id if message.from_user else None,
-            admin_username=message.from_user.username if message.from_user else None,
-        )
-
-        # Notify the user
-        try:
-            from botspot.core.dependency_manager import get_dependency_manager
-
-            bot = get_dependency_manager().bot
-            await bot.send_message(
-                int(target_user_id),
-                f"Ваша оплата {amount}₽ подтверждена администратором. Спасибо!",
-            )
-        except Exception as e:
-            logger.warning(f"Could not notify user {target_user_id}: {e}")
-    else:
-        # No user_id — update by registration _id
-        await app.collection.update_one(
-            {"_id": reg["_id"]},
-            {"$set": {"payment_status": "confirmed", "payment_amount": amount}},
-        )
-
+    await _apply_admin_confirmed_payment(
+        app,
+        message,
+        reg=reg,
+        target_user_id=target_user_id,
+        target_name=target_name,
+        event_id=selected,
+        amount=amount,
+        admin_comment=None,
+        user_note=(
+            f"Ваша оплата {amount}₽ подтверждена администратором. Спасибо!\n"
+            "Именной билет отправляем следующим сообщением. "
+            "Если он не появится, откройте /status."
+        ),
+    )
     await send_safe(
         chat_id,
         f"Оплата {amount}₽ подтверждена для {target_name}.",
     )
     await app.export_registered_users_to_google_sheets()
+
+
+async def _apply_admin_confirmed_payment(
+    app: App,
+    message: Message,
+    *,
+    reg: dict,
+    target_user_id,
+    target_name: str,
+    event_id: str,
+    amount: int,
+    admin_comment: Optional[str],
+    user_note: str,
+) -> None:
+    if target_user_id:
+        kwargs = dict(
+            user_id=int(target_user_id),
+            event_id=event_id,
+            status="confirmed",
+            payment_amount=amount,
+            admin_id=message.from_user.id if message.from_user else None,
+            admin_username=message.from_user.username if message.from_user else None,
+        )
+        if admin_comment:
+            kwargs["admin_comment"] = admin_comment
+        await app.update_payment_status(**kwargs)
+        try:
+            from botspot.core.dependency_manager import get_dependency_manager
+
+            bot = get_dependency_manager().bot
+            await bot.send_message(int(target_user_id), user_note)
+        except Exception as e:
+            logger.warning(f"Could not notify user {target_user_id}: {e}")
+        await _send_admin_confirmed_ticket(app, int(target_user_id), event_id)
+    else:
+        from datetime import datetime
+
+        update = {
+            "payment_status": "confirmed",
+            "payment_amount": amount,
+            "payment_verified_at": datetime.now().isoformat(),
+        }
+        if admin_comment:
+            update["admin_comment"] = admin_comment
+        await app.collection.update_one({"_id": reg["_id"]}, {"$set": update})
+
+
+async def admin_discretionary_payment(
+    message: Message, state: FSMContext, app: App
+) -> None:
+    """Maria/admin: free entry or custom discounted amount for one registrant."""
+    chat_id = message.chat.id
+    selected = await _select_event_for_payment(chat_id, state, app)
+    if not selected:
+        return
+
+    user_result = await _select_unpaid_user(chat_id, state, app, selected)
+    if not user_result:
+        return
+    reg, target_user_id, target_name = user_result
+
+    mode = await ask_user_choice(
+        chat_id,
+        f"Участник: {target_name}\n"
+        "Решение по взносу (скидка / бесплатно — на усмотрение Марии):",
+        choices={
+            "free": "Бесплатный вход (0 ₽, confirmed)",
+            "discount": "Своя сумма (скидка) → confirmed",
+            "cancel": "Отмена",
+        },
+        state=state,
+        timeout=None,
+    )
+    if mode in (None, "cancel"):
+        await send_safe(chat_id, "Отменено.")
+        return
+
+    if mode == "free":
+        amount = 0
+        comment = "discretionary_free"
+        user_note = (
+            "Для вас вход на встречу подтверждён без оплаты "
+            "(решение организаторов). Спасибо, что с нами!\n"
+            "Именной билет — следующим сообщением (или /status)."
+        )
+    else:
+        amount = await _confirm_payment_amount(
+            chat_id, state, f"{target_name} (скидочная сумма)"
+        )
+        if amount is None:
+            return
+        comment = f"discretionary_discount:{amount}"
+        user_note = (
+            f"Ваш взнос зафиксирован как {amount}₽ "
+            f"(индивидуальное решение организаторов). Спасибо!\n"
+            "Именной билет — следующим сообщением (или /status)."
+        )
+
+    await _apply_admin_confirmed_payment(
+        app,
+        message,
+        reg=reg,
+        target_user_id=target_user_id,
+        target_name=target_name,
+        event_id=selected,
+        amount=amount,
+        admin_comment=comment,
+        user_note=user_note,
+    )
+    await send_safe(
+        chat_id,
+        f"Готово: {target_name} — "
+        f"{'бесплатно' if amount == 0 else f'{amount}₽ (скидка)'}, статус confirmed.",
+    )
+    await app.export_registered_users_to_google_sheets()
+
+
+async def admin_payment_reminders_menu(
+    message: Message, state: FSMContext, app: App
+) -> None:
+    """Admin tools: plan, pause/unpause, send now, force daily tick."""
+    chat_id = message.chat.id
+    action = await ask_user_choice(
+        chat_id,
+        "Напоминания об оплате (D-4 еда / D-2 бейдж).\n"
+        "Авто: ежедневно ~09:00 + hourly; за день — превью админам.",
+        choices={
+            "plan": "Расписание / превью ближайших",
+            "pause": "Пауза (не слать автоматически)",
+            "unpause": "Снять паузу",
+            "send_now": "Отправить сейчас (выбрать встречу)",
+            "tick": "Запустить тик сейчас (превью+должные)",
+            "cancel": "Назад",
+        },
+        state=state,
+        timeout=None,
+    )
+    if action in (None, "cancel"):
+        await send_safe(chat_id, "Ок.")
+        return
+    if action == "plan":
+        await _admin_reminders_show_plan(message, app)
+    elif action == "pause":
+        await _admin_reminders_set_pause(message, state, app, paused=True)
+    elif action == "unpause":
+        await _admin_reminders_set_pause(message, state, app, paused=False)
+    elif action == "send_now":
+        await _admin_reminders_send_now(message, state, app)
+    elif action == "tick":
+        await admin_run_payment_reminders(message, app)
+
+
+async def _admin_reminders_show_plan(message: Message, app: App) -> None:
+    from src.payment_reminders import list_upcoming_reminder_plan
+
+    plan = await list_upcoming_reminder_plan(app, days_ahead=14)
+    if not plan:
+        await send_safe(
+            message.chat.id, "В ближайшие 14 дней напоминаний не запланировано."
+        )
+        return
+    lines = ["📅 Ближайшие авто-напоминания:\n"]
+    for row in plan:
+        pause = " ⏸" if row["paused"] else ""
+        lines.append(
+            f"• {row['send_day']} {row['label']}{pause} — {row['city']}\n"
+            f"  превью админам: {row['preview_day']} · "
+            f"получателей ~{row['recipient_count']}\n"
+            f"  id={row['event_id'][:10]}…"
+        )
+    # First full text preview (so admins see copy)
+    first = plan[0]
+    lines.append("\n——— пример текста (первый в списке) ——-")
+    lines.append(first["text"])
+    await send_safe(message.chat.id, "\n".join(lines))
+
+
+async def _pick_event_and_kind(
+    chat_id: int, state: FSMContext, app: App, plan_only: bool = False
+) -> Optional[tuple[str, str, str]]:
+    """Returns (event_id, kind, city) or None."""
+    from src.payment_reminders import list_upcoming_reminder_plan
+    from src.payment_timeline import kind_label_ru
+
+    if plan_only:
+        plan = await list_upcoming_reminder_plan(app, days_ahead=30)
+        if not plan:
+            await send_safe(chat_id, "Нет предстоящих напоминаний.")
+            return None
+        choices = {}
+        for i, row in enumerate(plan):
+            key = f"{i}"
+            pause = " ⏸" if row["paused"] else ""
+            choices[key] = (
+                f"{row['send_day']} {row['label']}{pause} — {row['city']} "
+                f"({row['recipient_count']} чел.)"
+            )
+        choices["cancel"] = "Отмена"
+        pick = await ask_user_choice(
+            chat_id, "Выберите напоминание:", choices=choices, state=state, timeout=None
+        )
+        if pick in (None, "cancel"):
+            return None
+        row = plan[int(pick)]
+        return row["event_id"], row["kind"], row["city"]
+
+    # All non-archived events × kinds
+    selected = await _select_event_for_payment(chat_id, state, app)
+    if not selected:
+        return None
+    event = await app.get_event_by_id(selected)
+    city = (event or {}).get("city", "?")
+    kind = await ask_user_choice(
+        chat_id,
+        f"{city}: какой тип?",
+        choices={
+            "d4": kind_label_ru("d4"),
+            "d2": kind_label_ru("d2"),
+            "cancel": "Отмена",
+        },
+        state=state,
+        timeout=None,
+    )
+    if kind in (None, "cancel"):
+        return None
+    return selected, kind, city
+
+
+async def _admin_reminders_set_pause(
+    message: Message, state: FSMContext, app: App, *, paused: bool
+) -> None:
+    from src.payment_reminders import set_paused
+    from src.payment_timeline import kind_label_ru
+
+    pick = await _pick_event_and_kind(message.chat.id, state, app, plan_only=True)
+    if not pick:
+        await send_safe(message.chat.id, "Отменено.")
+        return
+    event_id, kind, city = pick
+    ctrl = await set_paused(app, event_id, kind, paused)
+    state_ru = "на паузе ⏸" if ctrl.get("paused") else "активно ▶"
+    await send_safe(
+        message.chat.id,
+        f"{city} · {kind_label_ru(kind)}: теперь <b>{state_ru}</b>.",
+    )
+
+
+async def _admin_reminders_send_now(
+    message: Message, state: FSMContext, app: App
+) -> None:
+    from botspot.core.dependency_manager import get_dependency_manager
+    from src.payment_reminders import send_payment_reminders
+    from src.payment_timeline import kind_label_ru
+
+    pick = await _pick_event_and_kind(message.chat.id, state, app, plan_only=False)
+    if not pick:
+        await send_safe(message.chat.id, "Отменено.")
+        return
+    event_id, kind, city = pick
+    confirm = await ask_user_choice(
+        message.chat.id,
+        f"Отправить <b>сейчас</b> {kind_label_ru(kind)} для {city} "
+        f"(только тем, кому ещё не слали; пауза игнорируется)?",
+        choices={"yes": "Да, отправить", "no": "Отмена"},
+        state=state,
+        timeout=None,
+    )
+    if confirm != "yes":
+        await send_safe(message.chat.id, "Отменено.")
+        return
+    bot = get_dependency_manager().bot
+    stats = await send_payment_reminders(
+        app,
+        bot,
+        force_event_id=event_id,
+        force_kind=kind,
+        respect_pause=False,
+        only_due_today=False,
+    )
+    await send_safe(
+        message.chat.id,
+        f"Отправлено сейчас ({kind_label_ru(kind)} / {city}):\n"
+        f"d4={stats['d4']} d2={stats['d2']} "
+        f"skipped={stats['skipped']} errors={stats['errors']}",
+    )
+
+
+async def admin_run_payment_reminders(message: Message, app: App) -> None:
+    """Force daily tick: admin previews + due user sends (respects pause)."""
+    from botspot.core.dependency_manager import get_dependency_manager
+    from src.payment_reminders import daily_reminder_tick
+
+    chat_id = message.chat.id
+    await send_safe(
+        chat_id,
+        "Запускаю тик: превью «завтра» + рассылка должных на сегодня…",
+    )
+    try:
+        bot = get_dependency_manager().bot
+        result = await daily_reminder_tick(app, bot)
+    except Exception as e:
+        logger.exception("payment reminders tick failed")
+        await send_safe(chat_id, f"Ошибка: {e}")
+        return
+    prev = result["preview"]
+    send = result["send"]
+    await send_safe(
+        chat_id,
+        "Тик готов.\n"
+        f"Превью админам: {prev.get('previews', 0)} "
+        f"(skip {prev.get('skipped', 0)}, err {prev.get('errors', 0)})\n"
+        f"Пользователям: d4={send.get('d4', 0)} d2={send.get('d2', 0)} "
+        f"paused={send.get('paused', 0)} skipped={send.get('skipped', 0)} "
+        f"errors={send.get('errors', 0)}",
+    )
 
 
 @commands_menu.add_command(
@@ -452,17 +799,40 @@ async def normalize_db(message: Message, app: App):
 # else:
 #     file_type = "image/{file_name.split('.')[-1]}"
 async def extract_payment_from_image(
-    file_bytes: bytes, file_type: str = "image/jpeg"
+    file_bytes: bytes,
+    file_type: str = "image/jpeg",
+    *,
+    recipient_name: str | None = None,
+    recipient_phone: str | None = None,
+    model: str | None = None,
 ) -> PaymentInfo:
-    """Extract payment amount from an image or PDF using Claude Vision via litellm"""
+    """Extract amount + payment destination from image/PDF via vision (litellm).
+
+    Destination: if receipt shows *recipient_name* / *recipient_phone* (Maria),
+    set ``paid_to_maria=True``; otherwise assume website payment.
+    """
     try:
-        # Define the system prompt for payment extraction
-        system_prompt = """You are a payment receipt analyzer.
-        Your task is to extract ONLY the payment amount in rubles from the receipt image or PDF.
+        name = (recipient_name or "").strip() or "(not provided)"
+        phone = (recipient_phone or "").strip() or "(not provided)"
+        system_prompt = f"""You are a payment receipt analyzer for a Russian meetup.
+Extract:
+1) payment amount in rubles (integer), if clearly visible
+2) whether this looks like a bank/SBP/phone transfer TO Maria (personal transfer),
+   vs a website / card / CloudPayments / online-acquiring payment.
 
-        If you cannot determine the amount or if it's ambiguous, set amount to null and is_valid to false."""
+Maria's payment details (match loosely — formatting varies):
+- Name: {name}
+- Phone: {phone}
 
-        # For images, encode to base64
+Set paid_to_maria=true if the recipient matches this name and/or phone
+(phone digits may appear with +7/8/spaces/dashes; name may be partial or transliterated).
+Set paid_to_maria=false for website payments, card checkouts, CloudPayments,
+merchant names unrelated to Maria, or when destination is unclear.
+method_reason: one short phrase in Russian or English explaining the destination guess.
+
+If amount is missing or ambiguous: amount=null, is_valid=false.
+Destination can still be set when amount is unclear."""
+
         encoded_file = base64.b64encode(file_bytes).decode("utf-8")
         if file_type not in ["image/jpeg", "image/png", "application/pdf"]:
             raise ValueError(f"Unsupported file type: {file_type}")
@@ -474,7 +844,10 @@ async def extract_payment_from_image(
                 "content": [
                     {
                         "type": "text",
-                        "text": "Please extract the payment amount from this receipt:",
+                        "text": (
+                            "Extract the payment amount and whether this receipt "
+                            "is a transfer to Maria vs a website payment."
+                        ),
                     },
                     {
                         "type": "image_url",
@@ -484,18 +857,18 @@ async def extract_payment_from_image(
             },
         ]
 
-        # Make the API call with the Pydantic model
+        use_model = model or DEFAULT_PAYMENT_PARSE_MODEL
         response = await acompletion(
-            model="anthropic/claude-sonnet-4-6",
+            model=use_model,
             messages=messages,
-            max_tokens=100,
+            max_tokens=200,
             response_format=PaymentInfo,
         )
 
         return PaymentInfo(**json.loads(response.choices[0].message.content))  # type: ignore[union-attr]
     except Exception as e:
         logger.error(f"Error extracting payment amount: {e}")
-        return PaymentInfo(amount=None, is_valid=False)
+        return PaymentInfo(amount=None, is_valid=False, paid_to_maria=False)
 
 
 def _get_file_info(response) -> Optional[tuple]:
@@ -568,16 +941,27 @@ async def parse_payment_handler(message: Message, state: FSMContext):
             await status_msg.edit_text("❌ Не удалось скачать файл")
             return
 
-        # Extract payment information directly from the file
-        result = await extract_payment_from_image(file_data, file_type)
+        from src.app import App
 
-        # Format the response
+        settings = App().settings
+        result = await extract_payment_from_image(
+            file_data,
+            file_type,
+            recipient_name=settings.payment_name,
+            recipient_phone=settings.payment_phone_number,
+            model=getattr(settings, "payment_parse_model", None),
+        )
+
         if result.is_valid:
             response_text = f"✅ Обнаружен платеж на сумму: <b>{result.amount}</b> руб."
         else:
             response_text = "❌ Не удалось извлечь сумму платежа"
 
-        # Update the status message with the results
+        method_label = "Маше (перевод)" if result.paid_to_maria else "сайт / карта"
+        response_text += f"\n📍 Куда (AI): <b>{method_label}</b>"
+        if result.method_reason:
+            response_text += f"\n💬 {result.method_reason}"
+
         await status_msg.edit_text(response_text, parse_mode="HTML")
 
     except Exception as e:

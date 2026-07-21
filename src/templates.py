@@ -169,40 +169,31 @@ class _HtmlChecker(HTMLParser):
         return self
 
 
-def validate_template(spec: TemplateSpec, text: str) -> List[str]:
-    """Admin-facing reasons the text is unusable. Empty list means it's fine."""
-    errors: List[str] = []
-
-    if not text.strip():
-        errors.append("Текст не может быть пустым.")
-        return errors
-
+def _validate_placeholders(spec: TemplateSpec, text: str, errors: List[str]) -> None:
     used = set(PLACEHOLDER_RE.findall(text))
     unknown = used - spec.placeholders
     if unknown:
         allowed = ", ".join("{" + p + "}" for p in sorted(spec.placeholders))
         got = ", ".join("{" + p + "}" for p in sorted(unknown))
         errors.append(f"Неизвестные подстановки: {got}. Доступны: {allowed}")
-
     missing = spec.placeholders - used
     if missing:
         required = ", ".join("{" + p + "}" for p in sorted(missing))
         errors.append(f"Обязательные подстановки пропущены: {required}")
-
-    # A lone "{" or "}" that isn't part of a placeholder is almost always a typo
-    # that would silently ship to users as a stray brace.
+    # Lone braces that aren't placeholders are almost always typos.
     without = PLACEHOLDER_RE.sub("", text)
     if "{" in without or "}" in without:
         errors.append("Непарная скобка { или }. Подстановки пишутся как {name}.")
 
+
+def _validate_html_markup(text: str, errors: List[str]) -> None:
     checker = _HtmlChecker()
     try:
         checker.feed(text)
         checker.finish()
     except Exception as e:  # pragma: no cover - HTMLParser is lenient
         errors.append(f"Не удалось разобрать HTML: {e}")
-        return errors
-
+        return
     if checker.bad_tags:
         tags = ", ".join(sorted(set(checker.bad_tags)))
         errors.append(
@@ -224,6 +215,14 @@ def validate_template(spec: TemplateSpec, text: str) -> List[str]:
     if checker.stray_close:
         errors.append(f"Лишние закрывающие теги: {', '.join(checker.stray_close)}")
 
+
+def validate_template(spec: TemplateSpec, text: str) -> List[str]:
+    """Admin-facing reasons the text is unusable. Empty list means it's fine."""
+    if not text.strip():
+        return ["Текст не может быть пустым."]
+    errors: List[str] = []
+    _validate_placeholders(spec, text, errors)
+    _validate_html_markup(text, errors)
     return errors
 
 

@@ -26,7 +26,9 @@ def mock_app():
     mock_app = MagicMock()
     # Configure async src mocks with AsyncMock
     mock_app.get_user_registration = AsyncMock(return_value=None)
+    mock_app.get_profile_for_reuse = AsyncMock(return_value=None)
     mock_app.get_user_registrations = AsyncMock(return_value=[])
+    mock_app.get_user_active_registrations = AsyncMock(return_value=[])
     mock_app.log_registration_step = AsyncMock(return_value=None)
     mock_app.save_registered_user = AsyncMock()
     mock_app.export_registered_users_to_google_sheets = AsyncMock()
@@ -98,14 +100,14 @@ async def test_start_handler_existing_summer_user(
     )
     mock_app.is_event_passed = MagicMock(return_value=False)
     mock_app.get_user_active_registrations = AsyncMock(return_value=[])
-    mock_app.get_user_registration = AsyncMock(
-        return_value={
-            "full_name": "Test User",
-            "graduation_year": 2010,
-            "class_letter": "A",
-            "target_city": "Пермь (Летняя встреча 2025)",
-        }
-    )
+    profile = {
+        "full_name": "Test User",
+        "graduation_year": 2010,
+        "class_letter": "A",
+        "target_city": "Пермь (Летняя встреча 2025)",
+    }
+    mock_app.get_user_registration = AsyncMock(return_value=profile)
+    mock_app.get_profile_for_reuse = AsyncMock(return_value=profile)
 
     # Mock ask_user_choice to simulate user cancelling
     with patch("src.router.ask_user_choice") as mock_ask:

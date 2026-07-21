@@ -363,6 +363,57 @@ async def test_admin_register_payment_select_user_and_confirm(
 
 
 @pytest.mark.asyncio
+async def test_admin_register_payment_rereads_and_sends_confirmed_ticket(
+    mock_message, mock_state, mock_app, mock_send_safe
+):
+    """The separate admin flow sends the ticket from authoritative updated state."""
+
+    event = _make_event()
+    event_id = str(event["_id"])
+    unpaid = _make_unpaid_user(user_id=111, username="alice", full_name="Алиса")
+    confirmed = {
+        **unpaid,
+        "event_id": event_id,
+        "payment_status": "confirmed",
+        "payment_amount": 2000,
+    }
+    mock_app.get_all_events.return_value = [event]
+    mock_app.get_unpaid_users.return_value = [unpaid]
+    mock_app.collection.find_one.return_value = confirmed
+    mock_app.get_event_for_registration.return_value = event
+
+    choices = iter([event_id, "111"])
+
+    async def choose(*args, **kwargs):
+        return next(choices)
+
+    with (
+        patch(
+            "src.routers.admin.ask_user_choice",
+            new_callable=AsyncMock,
+            side_effect=choose,
+        ),
+        patch(
+            "src.routers.admin.ask_user_raw",
+            new_callable=AsyncMock,
+            return_value="2000",
+        ),
+        patch("botspot.core.dependency_manager.get_dependency_manager") as mock_deps,
+        patch(
+            "src.routers.admin.send_paid_ticket_card", new_callable=AsyncMock
+        ) as send_ticket,
+    ):
+        mock_deps.return_value.bot = AsyncMock()
+        await admin_register_payment(mock_message, mock_state, mock_app)
+
+    mock_app.collection.find_one.assert_awaited_once_with(
+        {"user_id": 111, "event_id": event_id}
+    )
+    mock_app.get_event_for_registration.assert_awaited_once_with(confirmed)
+    send_ticket.assert_awaited_once_with(111, confirmed, event)
+
+
+@pytest.mark.asyncio
 async def test_admin_register_payment_manual_username_found(
     mock_message, mock_state, mock_app, mock_send_safe
 ):
@@ -416,7 +467,7 @@ async def test_admin_register_payment_manual_username_found(
         await admin_register_payment(mock_message, mock_state, mock_app)
 
     # Verify find_one called with stripped username
-    mock_app.collection.find_one.assert_called_once_with(
+    mock_app.collection.find_one.assert_any_await(
         {"username": "vasya", "event_id": eid}
     )
     mock_app.update_payment_status.assert_called_once_with(
@@ -752,7 +803,7 @@ async def test_admin_register_payment_manual_without_at_sign(
         mock_deps.return_value.bot = mock_bot
         await admin_register_payment(mock_message, mock_state, mock_app)
 
-    mock_app.collection.find_one.assert_called_once_with(
+    mock_app.collection.find_one.assert_any_await(
         {"username": "petya", "event_id": eid}
     )
     mock_app.update_payment_status.assert_called_once()

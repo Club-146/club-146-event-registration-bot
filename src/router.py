@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 from src.app import App, RegisteredUser, GraduateType, PAYMENT_STATUS_MAP
 from src.event_images import send_event_image
 from src.routers.admin import admin_handler
+from src.ticket_cards import is_ticket_unlocked, send_paid_ticket_card
 from botspot import commands_menu
 from src.user_interactions import ask_user, ask_user_choice
 from botspot.utils import send_safe, is_admin
@@ -1758,6 +1759,15 @@ def _format_payment_status_line(reg: Dict, event, graduate_type: str) -> str:
     return line
 
 
+def _format_ticket_status_line(reg: Dict) -> str:
+    if is_ticket_unlocked(reg):
+        return "🎟 Именной билет действителен для входа и доступен ниже.\n"
+    return (
+        "🎟 Заявка сохранена; действующего билета пока нет. "
+        "Именной билет появится после подтверждения оплаты.\n"
+    )
+
+
 def _format_registration_status_text(registrations, events_by_reg, app: App) -> str:
     status_text = "📋 Ваши регистрации:\n\n"
     for reg, event in zip(registrations, events_by_reg):
@@ -1781,6 +1791,7 @@ def _format_registration_status_text(registrations, events_by_reg, app: App) -> 
             )
 
         status_text += _format_payment_status_line(reg, event, graduate_type)
+        status_text += _format_ticket_status_line(reg)
         status_text += "\n"
     return status_text
 
@@ -1827,6 +1838,10 @@ async def status_handler(message: Message, state: FSMContext, app: App):
         status_text += "Следите за новостями в группе школы, чтобы не пропустить следующие встречи."
 
     await send_safe(message.chat.id, status_text, reply_markup=ReplyKeyboardRemove())
+
+    for registration, event in zip(registrations, events_by_reg):
+        if is_ticket_unlocked(registration):
+            await send_paid_ticket_card(message.chat.id, registration, event)
 
 
 async def _status_no_registrations(message: Message, app: App):
@@ -1983,7 +1998,7 @@ async def start_handler(message: Message, state: FSMContext, app: App):
                 state=state,
             )
             if want_register:
-                existing_registration = await app.get_user_registration(
+                existing_registration = await app.get_profile_for_reuse(
                     message.from_user.id
                 )
                 await register_user(
@@ -1998,7 +2013,8 @@ async def start_handler(message: Message, state: FSMContext, app: App):
     if active_registrations:
         await handle_registered_user(message, state, active_registrations[0], app)
     else:
-        existing_registration = await app.get_user_registration(message.from_user.id)
+        # Soft-deleted (e.g. «too expensive») still prefill name/year on re-register.
+        existing_registration = await app.get_profile_for_reuse(message.from_user.id)
         if len(upcoming_events) == 1:
             await _show_single_event_welcome(
                 message, state, app, upcoming_events[0], existing_registration

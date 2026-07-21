@@ -89,12 +89,17 @@ def _format_event_summary(event: dict, reg_count: int = 0) -> str:
             f"🎓 Бесплатно для: {', '.join(n for n in names if n is not None)}"
         )
 
-    # Early bird info
+    # Early bird info (cutoff = food planning D-4 06:00)
     eb_discount = event.get("early_bird_discount", 0)
-    eb_deadline = event.get("early_bird_deadline")
     if eb_discount > 0:
-        deadline_str = eb_deadline.strftime("%d.%m.%Y") if eb_deadline else "не указан"
-        lines.append(f"🐦 Ранняя регистрация: скидка {eb_discount}₽ до {deadline_str}")
+        from src.payment_timeline import early_bird_deadline_at, format_deadline_ru
+
+        eb_at = early_bird_deadline_at(event)
+        deadline_str = format_deadline_ru(eb_at) if eb_at else "как срок заказа еды (D-4)"
+        lines.append(
+            f"🐦 Ранняя регистрация: скидка {eb_discount}₽ до {deadline_str} "
+            f"(= срок заказа еды)"
+        )
 
     # Guest settings
     if event.get("guests_enabled"):

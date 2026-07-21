@@ -386,44 +386,82 @@ def test_check_early_bird_no_event():
     assert discount == 0
 
 
-def test_check_early_bird_no_deadline():
+def test_check_early_bird_no_event_date():
+    """Discount without event date → no food/early-bird cutoff."""
     from src.routers.payment import _check_early_bird
 
     event = {"early_bird_discount": 200}
     is_early, deadline, discount = _check_early_bird(event)
     assert is_early is False
+    assert deadline is None
 
 
-def test_check_early_bird_active(monkeypatch):
-    from src.routers.payment import _check_early_bird
+def test_check_early_bird_active():
     from datetime import datetime
 
-    future_date = datetime(2099, 12, 31)
-    event = {"early_bird_deadline": future_date, "early_bird_discount": 300}
+    from src.payment_timeline import food_deadline
+    from src.routers.payment import _check_early_bird
+
+    # Early bird follows food deadline (D-4 06:00), not a separate field.
+    event = {
+        "date": datetime(2099, 12, 31),
+        "early_bird_discount": 300,
+        "early_bird_deadline": datetime(2000, 1, 1),  # ignored for timing
+    }
     is_early, deadline, discount = _check_early_bird(event)
     assert is_early is True
-    assert deadline == future_date
+    assert deadline == food_deadline(event)
     assert discount == 300
 
 
 def test_check_early_bird_expired():
-    from src.routers.payment import _check_early_bird
     from datetime import datetime
 
-    past_date = datetime(2000, 1, 1)
-    event = {"early_bird_deadline": past_date, "early_bird_discount": 300}
+    from src.routers.payment import _check_early_bird
+
+    event = {
+        "date": datetime(2000, 1, 10),
+        "early_bird_discount": 300,
+        "early_bird_deadline": datetime(2099, 1, 1),  # ignored
+    }
     is_early, deadline, discount = _check_early_bird(event)
     assert is_early is False
 
 
 def test_check_early_bird_zero_discount():
-    from src.routers.payment import _check_early_bird
     from datetime import datetime
 
-    future_date = datetime(2099, 12, 31)
-    event = {"early_bird_deadline": future_date, "early_bird_discount": 0}
+    from src.routers.payment import _check_early_bird
+
+    event = {
+        "date": datetime(2099, 12, 31),
+        "early_bird_discount": 0,
+    }
     is_early, deadline, discount = _check_early_bird(event)
     assert is_early is False
+
+
+def test_build_early_bird_payment_block_has_quote_and_final_price():
+    from src.routers.payment import _build_early_bird_payment_block
+
+    text = _build_early_bird_payment_block(
+        city="Пермь",
+        formula="1500р + 100 × (2026 − год выпуска)",
+        price_label="Минимальный взнос для вашего года выпуска",
+        regular_amount=2000,
+        discount=500,
+        discounted_amount=1500,
+        deadline_display="28.07.2026 в 06:00",
+        season="летней",
+        include_formula=True,
+    )
+    assert "<blockquote expandable>" in text
+    assert "расчет оплаты" in text
+    assert "2000 руб." in text
+    assert "скидка 500" in text
+    assert "Итоговая цена со скидкой за раннюю регистрацию" in text
+    assert "<b>1500 руб.</b>" in text
+    assert text.index("<blockquote") < text.index("Итоговая цена")
 
 
 # ---- Tests for _calc_guest_totals ----
@@ -602,11 +640,13 @@ async def test_send_payment_info_escapes_guest_name_for_telegram_html(
             total_discounted_with_guests=2300,
         )
 
-    guest_message = mock_send_safe.call_args_list[2].args[1]
+    # Price + guests are merged into the first message; how-to-pay is second.
+    first_message = mock_send_safe.call_args_list[0].args[1]
     assert (
-        "&lt;Тег&gt; &amp; &quot;двойная&quot; &#x27;одинарная&#x27;" in guest_message
+        "&lt;Тег&gt; &amp; &quot;двойная&quot; &#x27;одинарная&#x27;" in first_message
     )
-    assert "<Тег> & \"двойная\" 'одинарная'" not in guest_message
+    assert "<Тег> & \"двойная\" 'одинарная'" not in first_message
+    assert len(mock_send_safe.call_args_list) == 2
 
 
 def test_build_user_info_text_teacher():
@@ -768,7 +808,11 @@ async def test_screenshot_upload_persists_pending_with_forwarded_message_id(
 
     with patch(
         "src.routers.payment.parse_payment_info",
-        new=AsyncMock(return_value=PaymentInfo(amount=1800, is_valid=True)),
+        new=AsyncMock(
+            return_value=PaymentInfo(
+                amount=1800, is_valid=True, paid_to_maria=False, method_reason="card"
+            )
+        ),
     ):
         result = await _handle_screenshot_upload(
             mock_message,
@@ -792,6 +836,84 @@ async def test_screenshot_upload_persists_pending_with_forwarded_message_id(
     assert source_save.kwargs["screenshot_message_id"] == 777
     assert forwarded_save.kwargs["payment_status"] == "pending"
     assert forwarded_save.kwargs["screenshot_message_id"] == 888
+    # Direct upload (no button) → AI destination
+    assert forwarded_save.kwargs["payment_method"] == "on_site"
+    assert forwarded_save.kwargs["payment_method_source"] == "ai"
+    caption = bot.send_photo.await_args.kwargs["caption"]
+    assert "сайт" in caption.lower() or "карта" in caption.lower()
+
+
+@pytest.mark.asyncio
+async def test_screenshot_upload_ai_detects_maria(
+    mock_message,
+    mock_app,
+    mock_send_safe,
+    _mock_botspot_dependencies,
+):
+    from src.app import GraduateType
+    from src.routers.admin import PaymentInfo
+    from src.routers.payment import _handle_screenshot_upload
+
+    response = MagicMock(spec=Message)
+    response.photo = [MagicMock(file_id="proof-photo")]
+    response.document = None
+    response.message_id = 101
+    mock_app.collection.find_one.return_value = {
+        "full_name": "Тест",
+        "graduate_type": GraduateType.GRADUATE.value,
+    }
+    bot = _mock_botspot_dependencies.return_value.bot
+    bot.send_photo = AsyncMock(return_value=MagicMock(message_id=202))
+
+    with patch(
+        "src.routers.payment.parse_payment_info",
+        new=AsyncMock(
+            return_value=PaymentInfo(
+                amount=1500,
+                is_valid=True,
+                paid_to_maria=True,
+                method_reason="phone match",
+            )
+        ),
+    ):
+        await _handle_screenshot_upload(
+            mock_message,
+            response,
+            user_id=1,
+            username="u",
+            city="Пермь",
+            event_id="aabbccddeeff00112233aabb",
+            guests=[],
+            discount=0,
+            discounted_amount=1500,
+            regular_amount=1500,
+            formula_amount=1500,
+            graduate_type=GraduateType.GRADUATE.value,
+        )
+
+    forwarded_save = mock_app.save_payment_info.await_args_list[-1]
+    assert forwarded_save.kwargs["payment_method"] == "to_maria"
+    assert forwarded_save.kwargs["payment_method_source"] == "ai"
+    caption = bot.send_photo.await_args.kwargs["caption"]
+    assert "Маше" in caption
+
+
+def test_payment_info_method_property():
+    from src.routers.admin import PaymentInfo
+
+    assert PaymentInfo(amount=1, is_valid=True, paid_to_maria=True).payment_method == (
+        "to_maria"
+    )
+    assert PaymentInfo(amount=1, is_valid=True, paid_to_maria=False).payment_method == (
+        "on_site"
+    )
+
+
+def test_payment_method_label():
+    from src.routers.payment import _payment_method_label
+
+    assert "AI" in _payment_method_label("to_maria", source="ai")
+    assert "выбрал" in _payment_method_label("on_site", source="user")
 
 
 # ---- Tests for _get_graduate_type_info ----

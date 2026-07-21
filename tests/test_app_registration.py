@@ -191,37 +191,36 @@ class TestAppRegistration:
             }
         ]
 
-        # Use patch to mock the get_user_registrations method
-        with patch.object(
-            self.app,
-            "get_user_registrations",
-            AsyncMock(return_value=sample_registrations),
-        ):
-            # Call the method
-            registration = await self.app.get_user_registration(123456)
+        # Mock find to return a cursor sorted newest-first
+        mock_cursor = MagicMock()
+        mock_cursor.sort = MagicMock(return_value=mock_cursor)
+        mock_cursor.to_list = AsyncMock(return_value=sample_registrations)
+        self.mock_collection.find = MagicMock(return_value=mock_cursor)
 
-            # Verify the method was called with correct parameters
-            self.app.get_user_registrations.assert_called_once_with(123456)
+        # Call the method
+        registration = await self.app.get_user_registration(123456)
 
-            # Verify the result
-            assert registration is not None
-            assert registration["target_city"] == "Москва"
+        # Verify the query and newest-first sort
+        self.mock_collection.find.assert_called_once_with({"user_id": 123456})
+        mock_cursor.sort.assert_called_once_with("_id", -1)
+
+        # Verify the result
+        assert registration is not None
+        assert registration["target_city"] == "Москва"
 
     @pytest.mark.asyncio
     async def test_get_user_registration_not_exists(self):
         """Test getting a single registration when user has no registrations"""
-        # Mock get_user_registrations to return empty list
-        with patch.object(
-            self.app, "get_user_registrations", AsyncMock(return_value=[])
-        ):
-            # Call the method
-            registration = await self.app.get_user_registration(123456)
+        mock_cursor = MagicMock()
+        mock_cursor.sort = MagicMock(return_value=mock_cursor)
+        mock_cursor.to_list = AsyncMock(return_value=[])
+        self.mock_collection.find = MagicMock(return_value=mock_cursor)
 
-            # Verify the method was called with correct parameters
-            self.app.get_user_registrations.assert_called_once_with(123456)
+        # Call the method
+        registration = await self.app.get_user_registration(123456)
 
-            # Verify the result
-            assert registration is None
+        # Verify the result
+        assert registration is None
 
     @pytest.mark.asyncio
     async def test_delete_user_registration_specific_event(self):
