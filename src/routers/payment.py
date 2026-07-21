@@ -192,15 +192,50 @@ def _season_adjective(event) -> str:
 
 
 def _check_early_bird(event) -> tuple[bool, object, int]:
-    early_bird_deadline = event.get("early_bird_deadline") if event else None
-    early_bird_discount_amount = event.get("early_bird_discount", 0) if event else 0
-    today = datetime.now()
-    is_early = (
-        early_bird_deadline
-        and today.date() <= early_bird_deadline.date()
-        and early_bird_discount_amount > 0
+    """Return (is_active, deadline_datetime|None, discount_amount).
+
+    Cutoff is shared with food planning (D-4 06:00) via payment_timeline.
+    """
+    from src.payment_timeline import early_bird_deadline_at, is_early_bird_active
+
+    if not event:
+        return False, None, 0
+    discount = int(event.get("early_bird_discount") or 0)
+    deadline = early_bird_deadline_at(event)
+    is_early = bool(discount > 0 and is_early_bird_active(event))
+    return is_early, deadline, discount if is_early else 0
+
+
+def _build_early_bird_payment_block(
+    *,
+    city: str,
+    formula: str,
+    price_label: str,
+    regular_amount: int,
+    discount: int,
+    discounted_amount: int,
+    deadline_display: str,
+    season: str,
+    include_formula: bool,
+) -> str:
+    """Price message when early bird is active: breakdown in collapsed quote."""
+    # Collapsed quote: formula + year price + discount (secondary detail).
+    quote_parts: list[str] = ["расчет оплаты"]
+    if include_formula:
+        quote_parts.append(f"{escape(str(city), quote=True)} → {escape(str(formula), quote=True)}")
+    quote_parts.append(
+        f"{escape(price_label, quote=True)}: {regular_amount} руб."
     )
-    return bool(is_early), early_bird_deadline, early_bird_discount_amount
+    quote_parts.append(f"При ранней регистрации скидка {discount} руб!")
+    quote_body = "\n".join(quote_parts)
+    # expandable = collapsed by default in Telegram clients that support it
+    return (
+        "💰 Оплата мероприятия\n\n"
+        f"<blockquote expandable>{quote_body}</blockquote>\n\n"
+        f"Итоговая цена со скидкой за раннюю регистрацию (до {escape(deadline_display, quote=True)}):\n"
+        f"<b>{discounted_amount} руб.</b>\n\n"
+        f"Очень ждём вас на {escape(season, quote=True)} встрече! 😊"
+    )
 
 
 async def _send_payment_info_messages(
@@ -219,6 +254,7 @@ async def _send_payment_info_messages(
     """Send payment info in two user-visible messages (price+guests, then how to pay)."""
     from botspot.core.dependency_manager import get_dependency_manager
     from src.pay_url import build_pay_url
+    from src.payment_timeline import format_deadline_ru
 
     deps = get_dependency_manager()
     await deps.bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -226,13 +262,6 @@ async def _send_payment_info_messages(
 
     payment_formula = _build_payment_formula(event)
     chunks: list[str] = []
-
-    if graduate_type != GraduateType.NON_GRADUATE.value:
-        chunks.append(
-            templates.render(
-                event, "payment_intro", {"city": city, "formula": payment_formula}
-            ).strip()
-        )
 
     price_label = (
         "Минимальный взнос для вас"
@@ -242,25 +271,31 @@ async def _send_payment_info_messages(
 
     is_early, early_bird_deadline, early_bird_discount_amount = _check_early_bird(event)
     season = _season_adjective(event)
+    include_formula = graduate_type != GraduateType.NON_GRADUATE.value
 
     if is_early:
         assert early_bird_deadline is not None
-        deadline_display = early_bird_deadline.strftime("%d.%m")
+        deadline_display = format_deadline_ru(early_bird_deadline)
         chunks.append(
-            templates.render(
-                event,
-                "payment_price_early",
-                {
-                    "price_label": price_label,
-                    "regular_amount": regular_amount,
-                    "deadline": deadline_display,
-                    "discount": early_bird_discount_amount,
-                    "discounted_amount": discounted_amount,
-                    "season": season,
-                },
-            ).strip()
+            _build_early_bird_payment_block(
+                city=city,
+                formula=payment_formula,
+                price_label=price_label,
+                regular_amount=regular_amount,
+                discount=early_bird_discount_amount,
+                discounted_amount=discounted_amount,
+                deadline_display=deadline_display,
+                season=season,
+                include_formula=include_formula,
+            )
         )
     else:
+        if include_formula:
+            chunks.append(
+                templates.render(
+                    event, "payment_intro", {"city": city, "formula": payment_formula}
+                ).strip()
+            )
         chunks.append(
             templates.render(
                 event,
@@ -280,8 +315,8 @@ async def _send_payment_info_messages(
             guest_msg += f"  {i}. {guest_name} — {g['price']} руб.\n"
         if is_early and total_regular_with_guests != total_discounted_with_guests:
             guest_msg += (
-                f"\n💰 Итого с гостями: {total_regular_with_guests} руб."
-                f"\n💰 <b>При ранней регистрации: {total_discounted_with_guests} руб.</b>"
+                f"\nИтоговая цена с гостями со скидкой за раннюю регистрацию:\n"
+                f"<b>{total_discounted_with_guests} руб.</b>"
             )
         else:
             guest_msg += (
@@ -463,8 +498,8 @@ async def _handle_too_expensive(
                     )
                 await send_safe(
                     message.chat.id,
-                    "Отметили интерес. Напишите @mariikors — она решает "
-                    "скидку / бесплатный вход / задачи.",
+                    "Отметили интерес. Напишите @mariikors — можно "
+                    "договориться на скидку / бесплатный вход / задачи.",
                 )
     else:
         await send_safe(
@@ -552,7 +587,23 @@ async def _handle_paid_await_proof(
         regular_amount,
         formula_amount,
         graduate_type,
+        payment_method=payment_method,
+        payment_method_source="user",
     )
+
+
+def _payment_method_label(method: str | None, *, source: str | None = None) -> str:
+    if method == "to_maria":
+        base = "Маше (перевод)"
+    elif method == "on_site":
+        base = "сайт / карта"
+    else:
+        base = "неизвестно"
+    if source == "ai":
+        return f"{base} · AI"
+    if source == "user":
+        return f"{base} · выбрал(а)"
+    return base
 
 
 def _build_user_info_text(
@@ -564,9 +615,18 @@ def _build_user_info_text(
     total_regular_with_guests: int,
     user_registration,
     graduate_type: str,
+    payment_method: str | None = None,
+    payment_method_source: str | None = None,
+    method_reason: str | None = None,
 ) -> str:
     user_info = f"👤 Пользователь: {username or ''} (ID: {user_id})\n"
     user_info += f"📍 Город: {city}\n"
+    if payment_method:
+        user_info += (
+            f"📍 Куда: {_payment_method_label(payment_method, source=payment_method_source)}\n"
+        )
+        if method_reason:
+            user_info += f"💬 {escape(method_reason)}\n"
     if guests:
         user_info += f"💰 Сумма (регистрант): {needs_to_pay}\n"
         user_info += f"👥 Гости ({len(guests)}):\n"
@@ -682,7 +742,10 @@ async def _forward_proof_to_events_chat(
     regular_amount: int,
     formula_amount: int,
     username: str,
-) -> None:
+    payment_method: str | None = None,
+    payment_method_source: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Forward proof to events chat. Returns resolved (payment_method, source)."""
     logger.info(f"Starting payment proof forwarding for user {user_id}, city: {city}")
     events_chat_id = app.settings.events_chat_id
     logger.info(f"Events chat ID: {events_chat_id}")
@@ -706,17 +769,6 @@ async def _forward_proof_to_events_chat(
         else GraduateType.GRADUATE.value
     )
 
-    user_info = _build_user_info_text(
-        user_id,
-        username,
-        city,
-        guests,
-        needs_to_pay,
-        total_regular_with_guests,
-        user_registration,
-        graduate_type,
-    )
-
     from botspot.core.dependency_manager import get_dependency_manager
 
     deps = get_dependency_manager()
@@ -728,6 +780,29 @@ async def _forward_proof_to_events_chat(
         f"Parsing payment info from response: has_photo={has_photo}, has_pdf={has_pdf}"
     )
     payment_info = await parse_payment_info(response, has_photo, has_pdf, bot)
+
+    # Prefer explicit user choice; otherwise AI destination (Maria name/phone → to_maria).
+    method_reason = payment_info.method_reason
+    if payment_method in ("on_site", "to_maria"):
+        resolved_method = payment_method
+        resolved_source = payment_method_source or "user"
+    else:
+        resolved_method = payment_info.payment_method
+        resolved_source = "ai"
+
+    user_info = _build_user_info_text(
+        user_id,
+        username,
+        city,
+        guests,
+        needs_to_pay,
+        total_regular_with_guests,
+        user_registration,
+        graduate_type,
+        payment_method=resolved_method,
+        payment_method_source=resolved_source,
+        method_reason=method_reason if resolved_source == "ai" else None,
+    )
 
     logger.info(
         f"Creating validation buttons for user {user_id}, city: {city}, event_id: {event_id}"
@@ -780,10 +855,13 @@ async def _forward_proof_to_events_chat(
         screenshot_message_id=forwarded_msg.message_id,
         formula_amount=formula_amount,
         payment_status="pending",
+        payment_method=resolved_method,
+        payment_method_source=resolved_source,
     )
     logger.info(
         f"Payment proof from user {user_id} sent to validation chat with caption"
     )
+    return resolved_method, resolved_source
 
 
 async def _handle_screenshot_upload(
@@ -799,6 +877,8 @@ async def _handle_screenshot_upload(
     regular_amount: int,
     formula_amount: int,
     graduate_type: str,
+    payment_method: str | None = None,
+    payment_method_source: str | None = None,
 ) -> bool:
     has_photo = hasattr(response, "photo") and response.photo
     has_pdf = (
@@ -833,6 +913,8 @@ async def _handle_screenshot_upload(
             "amount": discounted_amount,
             "proof_type": "photo" if has_photo else "pdf",
             "graduate_type": graduate_type,
+            "payment_method": payment_method,
+            "payment_method_source": payment_method_source,
         },
         user_id,
         username,
@@ -847,6 +929,8 @@ async def _handle_screenshot_upload(
         formula_amount=formula_amount,
         username=username,
         payment_status="pending",
+        payment_method=payment_method,
+        payment_method_source=payment_method_source,
     )
 
     try:
@@ -862,6 +946,8 @@ async def _handle_screenshot_upload(
             regular_amount,
             formula_amount,
             username,
+            payment_method=payment_method,
+            payment_method_source=payment_method_source,
         )
     except Exception as e:
         logger.error(f"Error forwarding payment proof to validation chat: {e}")
@@ -1071,20 +1157,36 @@ async def parse_payment_info(
 ) -> PaymentInfo:
     from src.routers.admin import extract_payment_from_image
 
+    recipient_name = app.settings.payment_name
+    recipient_phone = app.settings.payment_phone_number
+    model = app.settings.payment_parse_model
+
     # Get the file
     if has_photo:
         file_id = response.photo[-1].file_id
         file = await bot.get_file(file_id)
         file_bytes = await bot.download_file(file.file_path)
-        return await extract_payment_from_image(file_bytes.read(), "image/jpeg")
+        return await extract_payment_from_image(
+            file_bytes.read(),
+            "image/jpeg",
+            recipient_name=recipient_name,
+            recipient_phone=recipient_phone,
+            model=model,
+        )
     elif has_pdf:
         assert response.document is not None
         file_id = response.document.file_id
         file = await bot.get_file(file_id)
         file_bytes = await bot.download_file(file.file_path)
-        return await extract_payment_from_image(file_bytes.read(), "application/pdf")
+        return await extract_payment_from_image(
+            file_bytes.read(),
+            "application/pdf",
+            recipient_name=recipient_name,
+            recipient_phone=recipient_phone,
+            model=model,
+        )
     else:
-        return PaymentInfo(amount=None, is_valid=False)
+        return PaymentInfo(amount=None, is_valid=False, paid_to_maria=False)
 
 
 # Add payment command handler

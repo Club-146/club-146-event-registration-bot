@@ -80,6 +80,9 @@ class AppSettings(BaseSettings):
     payment_name: str
     # Personal /donate pay links. Prod default; override on Coolify dev if needed.
     payment_site_base_url: str = "https://146.school"
+    # Vision model for receipt amount + Maria-vs-site detection (litellm id).
+    # Sonnet preferred — Haiku misclassified receipts in practice.
+    payment_parse_model: str = "anthropic/claude-sonnet-4-6"
 
     delay_messages: bool = True
 
@@ -336,14 +339,11 @@ class App:
                     regular_amount = base + rate * (ref_years // step)
                 formula_amount = regular_amount
 
-            # Early bird discount
-            early_bird_discount = event.get("early_bird_discount", 0)
-            early_bird_deadline = event.get("early_bird_deadline")
-            if (
-                early_bird_deadline
-                and datetime.now().date() <= early_bird_deadline.date()
-                and early_bird_discount > 0
-            ):
+            # Early bird = same cutoff as food planning (D-4 06:00)
+            from src.payment_timeline import is_early_bird_active
+
+            early_bird_discount = int(event.get("early_bird_discount") or 0)
+            if early_bird_discount > 0 and is_early_bird_active(event):
                 discount = early_bird_discount
                 discounted_amount = max(0, regular_amount - discount)
             else:
@@ -366,14 +366,10 @@ class App:
         minimum = event.get("guest_price_minimum", 0)
         regular_price = max(minimum, registrant_price)
 
-        # Apply early bird discount to guest price
-        early_bird_discount = event.get("early_bird_discount", 0)
-        early_bird_deadline = event.get("early_bird_deadline")
-        if (
-            early_bird_deadline
-            and datetime.now().date() <= early_bird_deadline.date()
-            and early_bird_discount > 0
-        ):
+        from src.payment_timeline import is_early_bird_active
+
+        early_bird_discount = int(event.get("early_bird_discount") or 0)
+        if early_bird_discount > 0 and is_early_bird_active(event):
             discounted_price = max(0, regular_price - early_bird_discount)
         else:
             discounted_price = regular_price
@@ -868,6 +864,8 @@ class App:
         formula_amount: Optional[int] = None,
         username: Optional[str] = None,
         payment_status: Optional[str] = None,
+        payment_method: Optional[str] = None,
+        payment_method_source: Optional[str] = None,
     ):
         """
         Save payment information for a user
@@ -881,6 +879,8 @@ class App:
             formula_amount: The payment amount calculated by formula
             username: Optional user's Telegram username for logging
             payment_status: Payment status (pending, confirmed, None for just registered)
+            payment_method: ``on_site`` | ``to_maria`` when known
+            payment_method_source: ``user`` | ``ai`` | etc.
         """
         # Update the user's registration with payment info
         update_data = {
@@ -894,6 +894,10 @@ class App:
         # Add formula amount if provided
         if formula_amount is not None:
             update_data["formula_payment_amount"] = formula_amount
+        if payment_method is not None:
+            update_data["payment_method"] = payment_method
+        if payment_method_source is not None:
+            update_data["payment_method_source"] = payment_method_source
 
         # Get user registration for logging
         user_data = await self.collection.find_one(
@@ -912,6 +916,10 @@ class App:
         }
         if formula_amount is not None:
             log_data["formula_amount"] = formula_amount
+        if payment_method is not None:
+            log_data["payment_method"] = payment_method
+        if payment_method_source is not None:
+            log_data["payment_method_source"] = payment_method_source
 
         await self.save_event_log("payment_info", log_data, user_id, username)
 

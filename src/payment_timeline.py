@@ -64,6 +64,75 @@ def format_deadline_ru(dt: Optional[datetime]) -> str:
     return dt.strftime("%d.%m.%Y в %H:%M")
 
 
+def format_date_short_ru(value: Any) -> str:
+    """Compact dd.mm for Telegram preview / TL;DR lines."""
+    if value is None:
+        return "—"
+    if isinstance(value, datetime):
+        return value.strftime("%d.%m")
+    if isinstance(value, date):
+        return value.strftime("%d.%m")
+    d = _as_date(value)
+    return d.strftime("%d.%m") if d else "—"
+
+
+def _as_datetime_date(value: Any) -> Optional[date]:
+    return _as_date(value)
+
+
+@dataclass(frozen=True)
+class EarlyBirdInfo:
+    discount: int
+    deadline: date
+    deadline_at: datetime
+    deadline_display: str  # full «dd.mm.YYYY в HH:MM» (same as food)
+    deadline_short: str  # dd.mm
+
+
+def early_bird_deadline_at(event: dict) -> Optional[datetime]:
+    """Early-bird cutoff = food planning cutoff (D-4 at 06:00).
+
+    Only when ``early_bird_discount > 0``. Stored ``early_bird_deadline`` is not
+    used for timing so pay-later / reminders / price math stay aligned.
+    """
+    if int(event.get("early_bird_discount") or 0) <= 0:
+        return None
+    return food_deadline(event)
+
+
+def is_early_bird_active(event: dict, now: Optional[datetime] = None) -> bool:
+    """True while now is strictly before the shared food / early-bird cutoff."""
+    now = now or datetime.now()
+    dl = early_bird_deadline_at(event)
+    return bool(dl and now < dl)
+
+
+def early_bird_info(event: dict) -> Optional[EarlyBirdInfo]:
+    """Return early-bird discount + shared cutoff if discount is configured."""
+    discount = int(event.get("early_bird_discount") or 0)
+    dl = early_bird_deadline_at(event)
+    if discount <= 0 or dl is None:
+        return None
+    return EarlyBirdInfo(
+        discount=discount,
+        deadline=dl.date(),
+        deadline_at=dl,
+        deadline_display=format_deadline_ru(dl),
+        deadline_short=format_date_short_ru(dl),
+    )
+
+
+def early_bird_near_food_cutoff(
+    event: dict, *, window_days: int = 2
+) -> Optional[EarlyBirdInfo]:
+    """Early bird for D-4 reminders: same cutoff as food (always 'near' when set).
+
+    ``window_days`` kept for call-site compatibility; unused after alignment.
+    """
+    _ = window_days
+    return early_bird_info(event)
+
+
 @dataclass(frozen=True)
 class TimelineCopy:
     food_deadline: Optional[datetime]
@@ -88,14 +157,31 @@ def timeline_for(event: dict, now: Optional[datetime] = None) -> TimelineCopy:
     )
 
 
+CANCEL_REGISTRATION_FOOTER = (
+    "Если передумали и не придёте — не забудьте отменить регистрацию: "
+    "/cancel_registration"
+)
+
+
 def pay_later_message(event: dict, now: Optional[datetime] = None) -> str:
     """User-facing text after «Оплачу позже»."""
+    now = now or datetime.now()
     t = timeline_for(event, now)
+    eb = early_bird_info(event)
+    if eb and not t.after_food_deadline:
+        food_line = (
+            f"• до <b>{t.food_deadline_display}</b> — успеваете в общий заказ еды "
+            f"и скидка за раннюю регистрацию (−{eb.discount}₽);\n"
+        )
+    else:
+        food_line = (
+            f"• до <b>{t.food_deadline_display}</b> — успеваете в общий заказ еды;\n"
+        )
     return (
         "Хорошо! Вы можете оплатить позже — команда /pay "
         "(там же ссылка на сайт и реквизиты).\n\n"
         "⏱ Сроки (ориентир — 06:00):\n"
-        f"• до <b>{t.food_deadline_display}</b> — успеваете в общий заказ еды;\n"
+        f"{food_line}"
         f"• после этой даты — пожалуйста, <b>принесите немного еды с собой</b>: "
         "мы заказываем заранее, и при большом числе поздних оплат на месте "
         "может не хватить / придётся докупать.\n"
@@ -150,21 +236,52 @@ def admin_preview_kinds_for_event(
 
 
 def reminder_message(kind: str, event: dict, city: str) -> str:
+    """Auto-reminder copy. First line is a dense TL;DR for Telegram chat preview."""
     t = timeline_for(event)
+    food_short = format_date_short_ru(t.food_deadline)
+    badge_short = format_date_short_ru(t.badge_deadline)
+    eb = early_bird_near_food_cutoff(event)
+
     if kind == "d4":
-        return (
-            f"Напоминание о встрече в {city}: до мероприятия 4 дня.\n\n"
-            f"Если ещё не оплатили взнос — сейчас удобное время (/pay).\n"
-            f"После <b>{t.food_deadline_display}</b> еду планируем с запасом; "
-            "при поздней оплате лучше принести что-то к столу с собой.\n"
-            f"Именной бейдж — если оплатите до <b>{t.badge_deadline_display}</b>."
+        # First line ≈ chat list preview (keep short, high-signal).
+        tldr_bits = [f"⏱ {city} · 4 дня", f"еда до {food_short}"]
+        if eb:
+            tldr_bits.append(f"ранняя −{eb.discount}₽ до {eb.deadline_short}")
+        tldr_bits.append("/pay")
+        tldr = " · ".join(tldr_bits)
+
+        body = (
+            f"{tldr}\n\n"
+            "Если ещё не оплатили взнос — сейчас удобный момент: /pay.\n"
         )
+        if eb:
+            body += (
+                f"До <b>{t.food_deadline_display}</b> — общий заказ еды "
+                f"и ранняя скидка <b>−{eb.discount}₽</b>; "
+                "после — еду планируем с запасом, при поздней оплате лучше "
+                "принести что-то к столу с собой.\n"
+            )
+        else:
+            body += (
+                f"После <b>{t.food_deadline_display}</b> еду планируем с запасом; "
+                "при поздней оплате лучше принести что-то к столу с собой.\n"
+            )
+        body += (
+            f"Именной бейдж — если оплатите до <b>{t.badge_deadline_display}</b>."
+            f"\n\n{CANCEL_REGISTRATION_FOOTER}"
+        )
+        return body
+
     if kind == "d2":
+        tldr = (
+            f"⏱ {city} · 2 дня · бейдж до {badge_short} · /pay"
+        )
         return (
-            f"Напоминание о встрече в {city}: осталось 2 дня.\n\n"
+            f"{tldr}\n\n"
             f"<b>Последний срок для именного бейджа</b> — "
             f"<b>{t.badge_deadline_display}</b>.\n"
-            "Оплатить: /pay. После оплаты пришлите скриншот в чат."
+            "Оплатить: /pay. После оплаты пришлите скриншот в чат.\n\n"
+            f"{CANCEL_REGISTRATION_FOOTER}"
         )
     raise ValueError(f"unknown reminder kind: {kind}")
 
@@ -179,8 +296,8 @@ def kind_label_ru(kind: str) -> str:
 
 VOLUNTEER_OPTIONS_TEXT = (
     "Если хотите помочь вместо взноса или в дополнение — напишите "
-    "организатору <b>@mariikors</b>. Мария решает индивидуально "
-    "(скидка / бесплатный вход / волонтёрство).\n\n"
+    "организатору <b>@mariikors</b>. Можно договориться на "
+    "скидку / бесплатный вход / волонтёрство.\n\n"
     "Примеры задач:\n"
     "• проверка бейджей на входе\n"
     "• помощь с готовкой / уборкой / орг. делами\n"

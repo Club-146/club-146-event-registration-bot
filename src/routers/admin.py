@@ -24,6 +24,19 @@ from botspot.utils.admin_filter import AdminFilter
 class PaymentInfo(BaseModel):
     amount: Optional[int]
     is_valid: bool  # Whether there's a clear payment amount in the document
+    # True if receipt looks like a transfer to Maria (name/phone from env).
+    # False → treat as website / card payment (CloudPayments, etc.).
+    paid_to_maria: bool = False
+    method_reason: Optional[str] = None  # short free-text evidence for admins/logs
+
+    @property
+    def payment_method(self) -> str:
+        """Canonical method key used elsewhere: on_site | to_maria."""
+        return "to_maria" if self.paid_to_maria else "on_site"
+
+
+# Sonnet: Haiku was cheaper but misclassified receipts; override via PAYMENT_PARSE_MODEL.
+DEFAULT_PAYMENT_PARSE_MODEL = "anthropic/claude-sonnet-4-6"
 
 
 router = Router()
@@ -786,17 +799,40 @@ async def normalize_db(message: Message, app: App):
 # else:
 #     file_type = "image/{file_name.split('.')[-1]}"
 async def extract_payment_from_image(
-    file_bytes: bytes, file_type: str = "image/jpeg"
+    file_bytes: bytes,
+    file_type: str = "image/jpeg",
+    *,
+    recipient_name: str | None = None,
+    recipient_phone: str | None = None,
+    model: str | None = None,
 ) -> PaymentInfo:
-    """Extract payment amount from an image or PDF using Claude Vision via litellm"""
+    """Extract amount + payment destination from image/PDF via vision (litellm).
+
+    Destination: if receipt shows *recipient_name* / *recipient_phone* (Maria),
+    set ``paid_to_maria=True``; otherwise assume website payment.
+    """
     try:
-        # Define the system prompt for payment extraction
-        system_prompt = """You are a payment receipt analyzer.
-        Your task is to extract ONLY the payment amount in rubles from the receipt image or PDF.
+        name = (recipient_name or "").strip() or "(not provided)"
+        phone = (recipient_phone or "").strip() or "(not provided)"
+        system_prompt = f"""You are a payment receipt analyzer for a Russian meetup.
+Extract:
+1) payment amount in rubles (integer), if clearly visible
+2) whether this looks like a bank/SBP/phone transfer TO Maria (personal transfer),
+   vs a website / card / CloudPayments / online-acquiring payment.
 
-        If you cannot determine the amount or if it's ambiguous, set amount to null and is_valid to false."""
+Maria's payment details (match loosely — formatting varies):
+- Name: {name}
+- Phone: {phone}
 
-        # For images, encode to base64
+Set paid_to_maria=true if the recipient matches this name and/or phone
+(phone digits may appear with +7/8/spaces/dashes; name may be partial or transliterated).
+Set paid_to_maria=false for website payments, card checkouts, CloudPayments,
+merchant names unrelated to Maria, or when destination is unclear.
+method_reason: one short phrase in Russian or English explaining the destination guess.
+
+If amount is missing or ambiguous: amount=null, is_valid=false.
+Destination can still be set when amount is unclear."""
+
         encoded_file = base64.b64encode(file_bytes).decode("utf-8")
         if file_type not in ["image/jpeg", "image/png", "application/pdf"]:
             raise ValueError(f"Unsupported file type: {file_type}")
@@ -808,7 +844,10 @@ async def extract_payment_from_image(
                 "content": [
                     {
                         "type": "text",
-                        "text": "Please extract the payment amount from this receipt:",
+                        "text": (
+                            "Extract the payment amount and whether this receipt "
+                            "is a transfer to Maria vs a website payment."
+                        ),
                     },
                     {
                         "type": "image_url",
@@ -818,18 +857,18 @@ async def extract_payment_from_image(
             },
         ]
 
-        # Make the API call with the Pydantic model
+        use_model = model or DEFAULT_PAYMENT_PARSE_MODEL
         response = await acompletion(
-            model="anthropic/claude-sonnet-4-6",
+            model=use_model,
             messages=messages,
-            max_tokens=100,
+            max_tokens=200,
             response_format=PaymentInfo,
         )
 
         return PaymentInfo(**json.loads(response.choices[0].message.content))  # type: ignore[union-attr]
     except Exception as e:
         logger.error(f"Error extracting payment amount: {e}")
-        return PaymentInfo(amount=None, is_valid=False)
+        return PaymentInfo(amount=None, is_valid=False, paid_to_maria=False)
 
 
 def _get_file_info(response) -> Optional[tuple]:
@@ -902,16 +941,27 @@ async def parse_payment_handler(message: Message, state: FSMContext):
             await status_msg.edit_text("❌ Не удалось скачать файл")
             return
 
-        # Extract payment information directly from the file
-        result = await extract_payment_from_image(file_data, file_type)
+        from src.app import App
 
-        # Format the response
+        settings = App().settings
+        result = await extract_payment_from_image(
+            file_data,
+            file_type,
+            recipient_name=settings.payment_name,
+            recipient_phone=settings.payment_phone_number,
+            model=getattr(settings, "payment_parse_model", None),
+        )
+
         if result.is_valid:
             response_text = f"✅ Обнаружен платеж на сумму: <b>{result.amount}</b> руб."
         else:
             response_text = "❌ Не удалось извлечь сумму платежа"
 
-        # Update the status message with the results
+        method_label = "Маше (перевод)" if result.paid_to_maria else "сайт / карта"
+        response_text += f"\n📍 Куда (AI): <b>{method_label}</b>"
+        if result.method_reason:
+            response_text += f"\n💬 {result.method_reason}"
+
         await status_msg.edit_text(response_text, parse_mode="HTML")
 
     except Exception as e:
