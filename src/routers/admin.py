@@ -71,6 +71,7 @@ _ADMIN_SUBMENUS = {
             "view_year_stats": "По годам выпуска",
             "five_year_stats": "По пятилеткам выпуска",
             "payment_stats": "Диаграмма оплат",
+            "source_stats": "Источники (deep links / кампании)",
         },
     ),
 }
@@ -94,6 +95,7 @@ async def _dispatch_admin_action(
         show_five_year_stats,
         show_payment_stats,
         show_simple_stats,
+        show_source_stats,
         show_stats,
         show_year_stats,
     )
@@ -128,6 +130,8 @@ async def _dispatch_admin_action(
         await show_five_year_stats(message, app=app)
     elif response == "payment_stats":
         await show_payment_stats(message, app=app)
+    elif response == "source_stats":
+        await show_source_stats(message, app=app)
 
 
 async def admin_handler(message: Message, state: FSMContext, app: App):

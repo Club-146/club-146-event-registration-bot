@@ -1077,3 +1077,69 @@ async def show_payment_stats(message: Message, app: App):
         BufferedInputFile(buf.getvalue(), filename="payment_stats.png"),
         caption=caption,
     )
+
+
+def _format_source_counts(rows: list, *, value_key: str = "count") -> str:
+    if not rows:
+        return "  (нет данных)\n"
+    lines = []
+    for row in rows:
+        label = row.get("_id") or "—"
+        lines.append(f"  • <code>{label}</code>: <b>{row.get(value_key, 0)}</b>")
+    return "\n".join(lines) + "\n"
+
+
+def _format_recent_source_clicks(recent: list) -> str:
+    if not recent:
+        return "  (пока нет кликов)\n"
+    lines = []
+    for entry in recent:
+        data = entry.get("data") or {}
+        source = data.get("source", "?")
+        uid = entry.get("user_id", "?")
+        uname = entry.get("username") or ""
+        who = f"@{uname}" if uname else str(uid)
+        ts = (entry.get("timestamp") or "")[:19]
+        first_flag = "🆕 " if data.get("is_first") else ""
+        lines.append(f"  • {ts} {first_flag}<code>{source}</code> — {who}")
+    return "\n".join(lines) + "\n"
+
+
+@commands_menu.add_command(
+    "source_stats",
+    "Статистика источников (deep links)",
+    visibility=Visibility.ADMIN_ONLY,
+)
+@router.message(Command("source_stats"), AdminFilter())
+async def show_source_stats(message: Message, app: App):
+    """Campaign / deep-link attribution: first source, last source, all clicks."""
+    stats = await app.get_source_attribution_stats()
+
+    text = "<b>🔗 Источники трафика (deep links)</b>\n\n"
+    text += f"👥 Пользователей с атрибуцией: <b>{stats['total_users']}</b>\n"
+    text += f"🖱 Всего кликов (history): <b>{stats['total_clicks']}</b>\n\n"
+
+    text += "<b>1) Первый источник (first_source)</b>\n"
+    text += "<i>Оригинальный канал. Не меняется. "
+    text += (
+        f"<code>{App.BEFORE_TRACKING_SOURCE}</code> = были в базе до трекинга.</i>\n"
+    )
+    text += _format_source_counts(stats["first_sources"])
+    text += "\n"
+
+    text += "<b>2) Последний источник (last_source)</b>\n"
+    text += _format_source_counts(stats["last_sources"])
+    text += "\n"
+
+    text += "<b>3) Все клики по кампаниям (history)</b>\n"
+    text += _format_source_counts(stats["clicks_by_source"], value_key="clicks")
+    text += "\n"
+
+    text += "<b>Последние клики</b>\n"
+    text += _format_recent_source_clicks(stats["recent"])
+    text += (
+        "\nСсылки: <code>t.me/&lt;bot&gt;?start=email_campaign</code>\n"
+        "Команда: /source_stats"
+    )
+
+    await send_safe(message.chat.id, text)

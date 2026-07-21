@@ -38,6 +38,10 @@ def mock_app():
     mock_app.log_registration_completed = AsyncMock()
     mock_app.save_event_log = AsyncMock()
     mock_app.record_start_source = AsyncMock(return_value=None)
+    mock_app.user_sources = MagicMock()
+    mock_app.user_sources.find_one = AsyncMock(return_value={"user_id": 12345})
+    mock_app.BEFORE_TRACKING_SOURCE = "before_tracking"
+    mock_app.DIRECT_SOURCE = "direct"
     yield mock_app
 
 
