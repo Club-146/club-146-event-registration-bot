@@ -523,3 +523,46 @@ async def backfill_before_tracking_sources(app):
         f"before_tracking backfill: seeded {inserted} users "
         f"(known={len(all_ids)}, already_tracked={len(already)})."
     )
+
+
+# ============================================================
+# Migration: Fill utm_* fields on rows created before structured parse
+# ============================================================
+@migration("008_backfill_utm_fields_from_raw")
+async def backfill_utm_fields_from_raw(app):
+    """Populate first/last utm_* from raw first_source/last_source when missing.
+
+    Migration 007 originally wrote only first_source/last_source. Later code
+    expects first_utm_source / first_utm_campaign for stats. Re-parse raw
+    payloads (including synthetic before_tracking / direct).
+    """
+    cursor = app.user_sources.find(
+        {
+            "$or": [
+                {"first_utm_source": {"$exists": False}},
+                {"first_utm_source": None},
+                {"last_utm_source": {"$exists": False}},
+                {"last_utm_source": None},
+            ]
+        }
+    )
+    rows = await cursor.to_list(length=None)
+    fixed = 0
+    for row in rows:
+        updates = {}
+        if not row.get("first_utm_source"):
+            attrs = app.parse_start_attribution(row.get("first_source")) or {}
+            if attrs.get("utm_source"):
+                updates["first_utm_source"] = attrs["utm_source"]
+                updates["first_utm_campaign"] = attrs.get("utm_campaign")
+                updates["first_utm_content"] = attrs.get("utm_content")
+        if not row.get("last_utm_source"):
+            attrs = app.parse_start_attribution(row.get("last_source")) or {}
+            if attrs.get("utm_source"):
+                updates["last_utm_source"] = attrs["utm_source"]
+                updates["last_utm_campaign"] = attrs.get("utm_campaign")
+                updates["last_utm_content"] = attrs.get("utm_content")
+        if updates:
+            await app.user_sources.update_one({"_id": row["_id"]}, {"$set": updates})
+            fixed += 1
+    logger.info(f"utm field backfill: updated {fixed} of {len(rows)} candidate rows.")
