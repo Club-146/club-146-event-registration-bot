@@ -332,6 +332,21 @@ class App:
         }
 
         if existing:
+            # Heal rows created before structured utm_* fields existed.
+            if not existing.get("first_utm_source"):
+                first_attrs = (
+                    self.parse_start_attribution(existing.get("first_source")) or {}
+                )
+                if first_attrs.get("utm_source"):
+                    last_fields.setdefault(
+                        "first_utm_source", first_attrs["utm_source"]
+                    )
+                    last_fields.setdefault(
+                        "first_utm_campaign", first_attrs.get("utm_campaign")
+                    )
+                    last_fields.setdefault(
+                        "first_utm_content", first_attrs.get("utm_content")
+                    )
             update: Dict = {"$set": last_fields}
             if count_as_click:
                 update["$push"] = {
