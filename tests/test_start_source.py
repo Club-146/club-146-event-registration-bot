@@ -61,6 +61,7 @@ async def test_record_start_source_first_and_last():
     inserted = sources.insert_one.await_args.args[0]
     assert inserted["first_source"] == "email_campaign"
     assert inserted["last_source"] == "email_campaign"
+    assert inserted["click_count"] == 1
     assert inserted["user_id"] == 42
 
     sources.find_one = AsyncMock(
@@ -75,8 +76,96 @@ async def test_record_start_source_first_and_last():
     sources.update_one.assert_awaited_once()
     update = sources.update_one.await_args.args[1]
     assert update["$set"]["last_source"] == "group_chat"
-    assert update["$set"]["first_source"] if False else True  # first not in $set
     assert "first_source" not in update["$set"]
+    assert update["$inc"]["click_count"] == 1
+    assert update["$push"]["history"]["$each"][0]["source"] == "group_chat"
+
+
+@pytest.mark.asyncio
+async def test_before_tracking_user_keeps_first_on_campaign_click():
+    app = App.__new__(App)
+    sources = MagicMock()
+    sources.find_one = AsyncMock(
+        return_value={
+            "user_id": 7,
+            "first_source": App.BEFORE_TRACKING_SOURCE,
+            "last_source": App.BEFORE_TRACKING_SOURCE,
+            "history": [],
+            "click_count": 0,
+        }
+    )
+    sources.update_one = AsyncMock()
+    sources.insert_one = AsyncMock()
+    app._user_sources = sources
+    app.save_event_log = AsyncMock()
+
+    result = await App.record_start_source(app, 7, "email_campaign", username="old")
+    assert result == "email_campaign"
+    sources.insert_one.assert_not_called()
+    update = sources.update_one.await_args.args[1]
+    assert update["$set"]["last_source"] == "email_campaign"
+    assert "first_source" not in update["$set"]
+    log = app.save_event_log.await_args
+    assert log.args[0] == "start_source"
+    assert log.args[1]["first_source"] == App.BEFORE_TRACKING_SOURCE
+    assert log.args[1]["is_first"] is False
+
+
+@pytest.mark.asyncio
+async def test_direct_start_without_click_does_not_inflate_history():
+    app = App.__new__(App)
+    sources = MagicMock()
+    sources.find_one = AsyncMock(return_value=None)
+    sources.insert_one = AsyncMock()
+    app._user_sources = sources
+    app.save_event_log = AsyncMock()
+
+    await App.record_start_source(
+        app, 9, App.DIRECT_SOURCE, username="x", count_as_click=False
+    )
+    doc = sources.insert_one.await_args.args[0]
+    assert doc["first_source"] == "direct"
+    assert doc["history"] == []
+    assert doc["click_count"] == 0
+    app.save_event_log.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_source_attribution_stats_shape():
+    app = App.__new__(App)
+    sources = MagicMock()
+    sources.count_documents = AsyncMock(return_value=3)
+
+    def aggregate(pipeline):
+        cursor = MagicMock()
+        pipeline_str = str(pipeline)
+        if "history" in pipeline_str and "$unwind" in pipeline_str:
+            cursor.to_list = AsyncMock(
+                return_value=[{"_id": "email_campaign", "clicks": 5}]
+            )
+        elif "click_count" in pipeline_str:
+            cursor.to_list = AsyncMock(return_value=[{"_id": None, "clicks": 5}])
+        else:
+            cursor.to_list = AsyncMock(
+                return_value=[{"_id": "before_tracking", "count": 2}]
+            )
+        return cursor
+
+    sources.aggregate = MagicMock(side_effect=aggregate)
+    app._user_sources = sources
+
+    logs = MagicMock()
+    logs.find = MagicMock(
+        return_value=MagicMock(
+            sort=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+        )
+    )
+    app._event_logs = logs
+
+    stats = await App.get_source_attribution_stats(app)
+    assert stats["total_users"] == 3
+    assert stats["total_clicks"] == 5
+    assert stats["clicks_by_source"][0]["_id"] == "email_campaign"
 
 
 @pytest.mark.asyncio

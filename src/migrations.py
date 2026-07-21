@@ -467,3 +467,53 @@ async def bump_moscow_spb_base_price(app):
     )
     if spb_result.modified_count > 0:
         logger.info("Bumped SPb base price: 1000 → 1500.")
+
+
+# ============================================================
+# Migration: Seed first_source=before_tracking for known users
+# ============================================================
+@migration("007_backfill_before_tracking_sources")
+async def backfill_before_tracking_sources(app):
+    """Mark every known Telegram user with first_source=before_tracking if missing.
+
+    Users who already interacted with the bot before deep-link attribution
+    must keep a stable original source so later campaign clicks only update
+    last_source + history, never overwrite first_source.
+    """
+    source = app.BEFORE_TRACKING_SOURCE
+    now = datetime.now().isoformat()
+
+    active_ids = set(await app.collection.distinct("user_id"))
+    deleted_ids = set(await app.deleted_users.distinct("user_id"))
+    all_ids = {uid for uid in (active_ids | deleted_ids) if uid is not None}
+    already = set(await app.user_sources.distinct("user_id"))
+    missing = sorted(all_ids - already)
+
+    if not missing:
+        logger.info("before_tracking backfill: nothing to seed.")
+        return
+
+    docs = [
+        {
+            "user_id": uid,
+            "username": None,
+            "first_source": source,
+            "first_source_at": now,
+            "last_source": source,
+            "last_source_at": now,
+            "history": [],
+            "click_count": 0,
+            "seeded": "before_tracking_backfill",
+        }
+        for uid in missing
+    ]
+    # insert_many in chunks to avoid oversized batches
+    chunk = 500
+    inserted = 0
+    for i in range(0, len(docs), chunk):
+        result = await app.user_sources.insert_many(docs[i : i + chunk])
+        inserted += len(result.inserted_ids)
+    logger.info(
+        f"before_tracking backfill: seeded {inserted} users "
+        f"(known={len(all_ids)}, already_tracked={len(already)})."
+    )
