@@ -13,6 +13,7 @@ from src.router import extract_start_payload
     [
         ("/start", None),
         ("/start email_campaign", "email_campaign"),
+        ("/start email__event_1_aug_26_invite_1", "email__event_1_aug_26_invite_1"),
         ("/start@register_146_meetup_2025_bot email_campaign", "email_campaign"),
         ("/start group_chat", "group_chat"),
         ("/start partner-ivan_01", "partner-ivan_01"),
@@ -32,6 +33,7 @@ def test_extract_start_payload(text, expected):
     ("raw", "expected"),
     [
         ("email_campaign", "email_campaign"),
+        ("email__event_1_aug_26_invite_1", "email__event_1_aug_26_invite_1"),
         ("  dm  ", "dm"),
         ("bad space", None),
         ("", None),
@@ -45,6 +47,24 @@ def test_normalize_start_payload(raw, expected):
     assert App.normalize_start_payload(raw) == expected
 
 
+@pytest.mark.parametrize(
+    ("raw", "utm_source", "utm_campaign", "utm_content"),
+    [
+        ("email__event_1_aug_26_invite_1", "email", "event_1_aug_26_invite_1", None),
+        ("group_chat", "group_chat", None, None),
+        ("email__invite__v2", "email", "invite", "v2"),
+        ("tg__partner_ivan__story_a", "tg", "partner_ivan", "story_a"),
+    ],
+)
+def test_parse_start_attribution(raw, utm_source, utm_campaign, utm_content):
+    attrs = App.parse_start_attribution(raw)
+    assert attrs is not None
+    assert attrs["raw"] == raw
+    assert attrs["utm_source"] == utm_source
+    assert attrs["utm_campaign"] == utm_campaign
+    assert attrs["utm_content"] == utm_content
+
+
 @pytest.mark.asyncio
 async def test_record_start_source_first_and_last():
     app = App.__new__(App)
@@ -55,20 +75,27 @@ async def test_record_start_source_first_and_last():
     app._user_sources = sources
     app.save_event_log = AsyncMock()
 
-    first = await App.record_start_source(app, 42, "email_campaign", username="maria")
-    assert first == "email_campaign"
+    first = await App.record_start_source(
+        app, 42, "email__event_1_aug_26_invite_1", username="maria"
+    )
+    assert first == "email__event_1_aug_26_invite_1"
     sources.insert_one.assert_awaited_once()
     inserted = sources.insert_one.await_args.args[0]
-    assert inserted["first_source"] == "email_campaign"
-    assert inserted["last_source"] == "email_campaign"
+    assert inserted["first_source"] == "email__event_1_aug_26_invite_1"
+    assert inserted["first_utm_source"] == "email"
+    assert inserted["first_utm_campaign"] == "event_1_aug_26_invite_1"
+    assert inserted["last_utm_source"] == "email"
+    assert inserted["last_utm_campaign"] == "event_1_aug_26_invite_1"
     assert inserted["click_count"] == 1
     assert inserted["user_id"] == 42
 
     sources.find_one = AsyncMock(
         return_value={
             "user_id": 42,
-            "first_source": "email_campaign",
-            "last_source": "email_campaign",
+            "first_source": "email__event_1_aug_26_invite_1",
+            "first_utm_source": "email",
+            "first_utm_campaign": "event_1_aug_26_invite_1",
+            "last_source": "email__event_1_aug_26_invite_1",
         }
     )
     second = await App.record_start_source(app, 42, "group_chat", username="maria")
@@ -76,9 +103,14 @@ async def test_record_start_source_first_and_last():
     sources.update_one.assert_awaited_once()
     update = sources.update_one.await_args.args[1]
     assert update["$set"]["last_source"] == "group_chat"
+    assert update["$set"]["last_utm_source"] == "group_chat"
+    assert update["$set"]["last_utm_campaign"] is None
     assert "first_source" not in update["$set"]
+    assert "first_utm_source" not in update["$set"]
     assert update["$inc"]["click_count"] == 1
-    assert update["$push"]["history"]["$each"][0]["source"] == "group_chat"
+    hist = update["$push"]["history"]["$each"][0]
+    assert hist["source"] == "group_chat"
+    assert hist["utm_source"] == "group_chat"
 
 
 @pytest.mark.asyncio
@@ -139,10 +171,24 @@ async def test_get_source_attribution_stats_shape():
     def aggregate(pipeline):
         cursor = MagicMock()
         pipeline_str = str(pipeline)
-        if "history" in pipeline_str and "$unwind" in pipeline_str:
+        if (
+            "utm_source" in pipeline_str
+            and "utm_campaign" in pipeline_str
+            and "$unwind" in pipeline_str
+        ):
             cursor.to_list = AsyncMock(
-                return_value=[{"_id": "email_campaign", "clicks": 5}]
+                return_value=[
+                    {
+                        "_id": {
+                            "utm_source": "email",
+                            "utm_campaign": "event_1_aug_26_invite_1",
+                        },
+                        "clicks": 5,
+                    }
+                ]
             )
+        elif "history" in pipeline_str and "$unwind" in pipeline_str:
+            cursor.to_list = AsyncMock(return_value=[{"_id": "email", "clicks": 5}])
         elif "click_count" in pipeline_str:
             cursor.to_list = AsyncMock(return_value=[{"_id": None, "clicks": 5}])
         else:
@@ -165,7 +211,10 @@ async def test_get_source_attribution_stats_shape():
     stats = await App.get_source_attribution_stats(app)
     assert stats["total_users"] == 3
     assert stats["total_clicks"] == 5
-    assert stats["clicks_by_source"][0]["_id"] == "email_campaign"
+    assert stats["clicks_by_pair"][0]["_id"]["utm_source"] == "email"
+    assert (
+        stats["clicks_by_pair"][0]["_id"]["utm_campaign"] == "event_1_aug_26_invite_1"
+    )
 
 
 @pytest.mark.asyncio
