@@ -6,6 +6,7 @@ from src.payment_timeline import (
     FOOD_DAYS_BEFORE,
     admin_preview_kinds_for_event,
     badge_deadline,
+    early_bird_near_food_cutoff,
     food_deadline,
     pay_later_message,
     reminder_kind_for_event,
@@ -15,8 +16,8 @@ from src.payment_timeline import (
 )
 
 
-def _event(day: date | datetime) -> dict:
-    return {"date": day, "city": "Пермь"}
+def _event(day: date | datetime, **extra) -> dict:
+    return {"date": day, "city": "Пермь", **extra}
 
 
 def test_deadlines_are_four_and_two_days_before_at_six_am():
@@ -59,16 +60,53 @@ def test_pay_later_message_contains_dates_and_rules():
     assert "/pay" in text
 
 
+def test_pay_later_combines_food_and_early_bird():
+    event = _event(date(2026, 8, 1), early_bird_discount=500)
+    text = pay_later_message(event, now=datetime(2026, 7, 1, 12, 0))
+    assert "28.07.2026" in text
+    assert "общий заказ еды" in text
+    assert "скидка за раннюю регистрацию" in text
+    assert "500" in text
+
+
 def test_reminder_and_too_expensive_copy():
     event = _event(date(2026, 8, 1))
     d4 = reminder_message("d4", event, "Пермь")
     d2 = reminder_message("d2", event, "Пермь")
     assert "4 дня" in d4 or "4 дн" in d4
     assert "бейдж" in d2.lower()
+    # TL;DR first line (Telegram preview)
+    assert d4.split("\n", 1)[0].startswith("⏱")
+    assert d2.split("\n", 1)[0].startswith("⏱")
+    assert "еда до 28.07" in d4.split("\n", 1)[0]
+    assert "бейдж до 30.07" in d2.split("\n", 1)[0]
+    # cancel footer on all auto-reminders
+    assert "/cancel_registration" in d4
+    assert "/cancel_registration" in d2
     cancel = too_expensive_cancel_message()
     assert "@mariikors" in cancel
     assert "волонт" in cancel.lower() or "Волонт" in cancel
 
+
+def test_d4_includes_early_bird_aligned_with_food():
+    # Early bird cutoff == food D-4 (28.07 06:00)
+    event = _event(date(2026, 8, 1), early_bird_discount=500)
+    info = early_bird_near_food_cutoff(event)
+    assert info is not None
+    assert info.discount == 500
+    assert info.deadline_short == "28.07"
+    d4 = reminder_message("d4", event, "Пермь")
+    first = d4.split("\n", 1)[0]
+    assert "ранняя" in first.lower() or "−500" in first or "-500" in first
+    assert "500" in d4
+    assert "28.07" in d4
+
+
+def test_d4_skips_early_bird_when_no_discount():
+    event = _event(date(2026, 8, 1), early_bird_discount=0)
+    assert early_bird_near_food_cutoff(event) is None
+    d4 = reminder_message("d4", event, "Пермь")
+    assert "ранняя" not in d4.lower()
 
 def test_admin_preview_is_day_before_send():
     event = _event(date(2026, 8, 1))
