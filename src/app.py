@@ -6,7 +6,7 @@ from enum import Enum
 from loguru import logger
 from pydantic import SecretStr, BaseModel
 from pydantic_settings import BaseSettings
-from typing import Optional, Tuple, List, Dict
+from typing import Any, Optional, Tuple, List, Dict
 
 from botspot import get_database
 from botspot.utils import send_safe
@@ -138,6 +138,10 @@ class App:
     deleted_users_collection_name = "deleted_users"
     events_collection_name = "events"
     user_sources_collection_name = "user_sources"
+    # Synthetic first_source for users who existed before deep-link tracking.
+    BEFORE_TRACKING_SOURCE = "before_tracking"
+    # Bare /start without ?start= payload (opened via @username / menu).
+    DIRECT_SOURCE = "direct"
 
     def __init__(self, **kwargs):
         from src.export import SheetExporter
@@ -241,12 +245,20 @@ class App:
         user_id: int,
         source: str,
         username: Optional[str] = None,
+        *,
+        count_as_click: bool = True,
     ) -> Optional[str]:
         """
-        Persist deep-link start payload for attribution.
+        Persist acquisition source for a user.
 
-        Keeps first_source (immutable) and last_source (updated each start),
-        plus a short history list. Also writes an event_logs entry.
+        - first_source is immutable once set (original acquisition channel)
+        - last_source updates on every tracked click
+        - history keeps recent clicks (up to 100) when count_as_click=True
+        - every click is also written to event_logs (type start_source)
+
+        Synthetic sources:
+        - before_tracking — backfilled for users known before attribution existed
+        - direct — bare /start without a deep-link payload
         """
         payload = self.normalize_start_payload(source)
         if not payload or user_id is None:
@@ -255,44 +267,103 @@ class App:
         now = datetime.now().isoformat()
         existing = await self.user_sources.find_one({"user_id": user_id})
         history_entry = {"source": payload, "at": now}
+        is_first = existing is None
 
         if existing:
-            await self.user_sources.update_one(
-                {"user_id": user_id},
-                {
-                    "$set": {
-                        "last_source": payload,
-                        "last_source_at": now,
-                        "username": username,
-                    },
-                    "$push": {
-                        "history": {
-                            "$each": [history_entry],
-                            "$slice": -50,
-                        }
-                    },
-                },
-            )
-        else:
-            await self.user_sources.insert_one(
-                {
-                    "user_id": user_id,
-                    "username": username,
-                    "first_source": payload,
-                    "first_source_at": now,
+            update: Dict = {
+                "$set": {
                     "last_source": payload,
                     "last_source_at": now,
-                    "history": [history_entry],
+                    "username": username,
+                },
+            }
+            if count_as_click:
+                update["$push"] = {
+                    "history": {
+                        "$each": [history_entry],
+                        "$slice": -100,
+                    }
                 }
-            )
+                update["$inc"] = {"click_count": 1}
+            await self.user_sources.update_one({"user_id": user_id}, update)
+        else:
+            doc = {
+                "user_id": user_id,
+                "username": username,
+                "first_source": payload,
+                "first_source_at": now,
+                "last_source": payload,
+                "last_source_at": now,
+                "history": [history_entry] if count_as_click else [],
+                "click_count": 1 if count_as_click else 0,
+            }
+            await self.user_sources.insert_one(doc)
 
-        await self.save_event_log(
-            "start_source",
-            {"source": payload, "is_first": existing is None},
-            user_id,
-            username,
-        )
+        if count_as_click:
+            await self.save_event_log(
+                "start_source",
+                {
+                    "source": payload,
+                    "is_first": is_first,
+                    "first_source": (
+                        payload if is_first else (existing or {}).get("first_source")
+                    ),
+                },
+                user_id,
+                username,
+            )
         return payload
+
+    async def get_source_attribution_stats(self) -> Dict[str, Any]:
+        """Aggregate campaign deep-link stats for admin display."""
+        total_users = await self.user_sources.count_documents({})
+        total_clicks_cursor = self.user_sources.aggregate(
+            [
+                {
+                    "$group": {
+                        "_id": None,
+                        "clicks": {"$sum": {"$ifNull": ["$click_count", 0]}},
+                    }
+                }
+            ]
+        )
+        total_clicks_rows = await total_clicks_cursor.to_list(length=1)
+        total_clicks = total_clicks_rows[0]["clicks"] if total_clicks_rows else 0
+
+        async def _count_by(field: str) -> List[Dict]:
+            cursor = self.user_sources.aggregate(
+                [
+                    {"$group": {"_id": f"${field}", "count": {"$sum": 1}}},
+                    {"$sort": {"count": -1}},
+                ]
+            )
+            return await cursor.to_list(length=None)
+
+        first_sources = await _count_by("first_source")
+        last_sources = await _count_by("last_source")
+
+        clicks_by_source_cursor = self.user_sources.aggregate(
+            [
+                {"$unwind": {"path": "$history", "preserveNullAndEmptyArrays": False}},
+                {"$group": {"_id": "$history.source", "clicks": {"$sum": 1}}},
+                {"$sort": {"clicks": -1}},
+            ]
+        )
+        clicks_by_source = await clicks_by_source_cursor.to_list(length=None)
+
+        recent_cursor = self.event_logs.find({"event_type": "start_source"}).sort(
+            "timestamp", -1
+        )
+        recent = await recent_cursor.to_list(length=15)
+
+        return {
+            "total_users": total_users,
+            "total_clicks": total_clicks,
+            "first_sources": first_sources,
+            "last_sources": last_sources,
+            "clicks_by_source": clicks_by_source,
+            "recent": recent,
+        }
 
     # ---- Event methods ----
 

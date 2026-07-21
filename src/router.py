@@ -2000,13 +2000,27 @@ async def start_handler(message: Message, state: FSMContext, app: App):
             message.from_user.id,
             message.from_user.username,
         )
+        # Attribution: campaign deep links count as clicks; bare /start is "direct"
+        # and only sets first_source if the user has no row yet (no history spam).
         if start_payload:
             await app.record_start_source(
                 message.from_user.id,
                 start_payload,
                 username=message.from_user.username,
+                count_as_click=True,
             )
             await state.update_data(start_source=start_payload)
+        else:
+            existing_source = await app.user_sources.find_one(
+                {"user_id": message.from_user.id}
+            )
+            if existing_source is None:
+                await app.record_start_source(
+                    message.from_user.id,
+                    App.DIRECT_SOURCE,
+                    username=message.from_user.username,
+                    count_as_click=False,
+                )
 
     if is_admin(message.from_user):
         result = await admin_handler(message, state, app=app)
