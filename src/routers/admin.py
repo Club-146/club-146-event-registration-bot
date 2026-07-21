@@ -71,7 +71,7 @@ _ADMIN_SUBMENUS = {
             "view_year_stats": "По годам выпуска",
             "five_year_stats": "По пятилеткам выпуска",
             "payment_stats": "Диаграмма оплат",
-            "source_stats": "Источники (deep links / кампании)",
+            "source_stats": "Кампании (source × campaign)",
         },
     ),
 }

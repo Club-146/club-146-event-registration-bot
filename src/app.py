@@ -240,6 +240,51 @@ class App:
             return None
         return payload
 
+    @staticmethod
+    def parse_start_attribution(
+        raw: Optional[str],
+    ) -> Optional[Dict[str, Optional[str]]]:
+        """
+        Parse Telegram deep-link payload into UTM-like labels.
+
+        Encoding (Telegram forbids ``=`` / ``&`` in start payloads; max 64 chars):
+
+            {utm_source}__{utm_campaign}
+            {utm_source}__{utm_campaign}__{utm_content}
+
+        Examples::
+
+            email__event_1_aug_26_invite_1
+            → utm_source=email, utm_campaign=event_1_aug_26_invite_1
+
+            group_chat
+            → utm_source=group_chat, utm_campaign=None  (legacy single token)
+
+        Double underscore ``__`` is the field separator; single ``_`` is allowed
+        inside each label (campaign slugs like ``event_1_aug_26_invite_1``).
+        """
+        payload = App.normalize_start_payload(raw)
+        if not payload:
+            return None
+
+        parts = [p for p in payload.split("__") if p]
+        if not parts:
+            return None
+
+        utm_source = parts[0]
+        utm_campaign = parts[1] if len(parts) >= 2 else None
+        utm_content = parts[2] if len(parts) >= 3 else None
+        # If more than 3 segments, fold the rest into content.
+        if len(parts) > 3:
+            utm_content = "__".join(parts[2:])
+
+        return {
+            "raw": payload,
+            "utm_source": utm_source,
+            "utm_campaign": utm_campaign,
+            "utm_content": utm_content,
+        }
+
     async def record_start_source(
         self,
         user_id: int,
@@ -251,8 +296,8 @@ class App:
         """
         Persist acquisition source for a user.
 
-        - first_source is immutable once set (original acquisition channel)
-        - last_source updates on every tracked click
+        - first_source / first_utm_* are immutable once set
+        - last_source / last_utm_* update on every tracked click
         - history keeps recent clicks (up to 100) when count_as_click=True
         - every click is also written to event_logs (type start_source)
 
@@ -260,23 +305,34 @@ class App:
         - before_tracking — backfilled for users known before attribution existed
         - direct — bare /start without a deep-link payload
         """
-        payload = self.normalize_start_payload(source)
-        if not payload or user_id is None:
+        attrs = self.parse_start_attribution(source)
+        if not attrs or user_id is None:
             return None
 
+        payload = attrs["raw"]
+        assert payload is not None
         now = datetime.now().isoformat()
         existing = await self.user_sources.find_one({"user_id": user_id})
-        history_entry = {"source": payload, "at": now}
+        history_entry = {
+            "source": payload,
+            "utm_source": attrs["utm_source"],
+            "utm_campaign": attrs["utm_campaign"],
+            "utm_content": attrs["utm_content"],
+            "at": now,
+        }
         is_first = existing is None
 
+        last_fields = {
+            "last_source": payload,
+            "last_source_at": now,
+            "last_utm_source": attrs["utm_source"],
+            "last_utm_campaign": attrs["utm_campaign"],
+            "last_utm_content": attrs["utm_content"],
+            "username": username,
+        }
+
         if existing:
-            update: Dict = {
-                "$set": {
-                    "last_source": payload,
-                    "last_source_at": now,
-                    "username": username,
-                },
-            }
+            update: Dict = {"$set": last_fields}
             if count_as_click:
                 update["$push"] = {
                     "history": {
@@ -292,8 +348,10 @@ class App:
                 "username": username,
                 "first_source": payload,
                 "first_source_at": now,
-                "last_source": payload,
-                "last_source_at": now,
+                "first_utm_source": attrs["utm_source"],
+                "first_utm_campaign": attrs["utm_campaign"],
+                "first_utm_content": attrs["utm_content"],
+                **last_fields,
                 "history": [history_entry] if count_as_click else [],
                 "click_count": 1 if count_as_click else 0,
             }
@@ -304,6 +362,9 @@ class App:
                 "start_source",
                 {
                     "source": payload,
+                    "utm_source": attrs["utm_source"],
+                    "utm_campaign": attrs["utm_campaign"],
+                    "utm_content": attrs["utm_content"],
                     "is_first": is_first,
                     "first_source": (
                         payload if is_first else (existing or {}).get("first_source")
@@ -339,17 +400,54 @@ class App:
             )
             return await cursor.to_list(length=None)
 
+        async def _count_history(field: str) -> List[Dict]:
+            cursor = self.user_sources.aggregate(
+                [
+                    {
+                        "$unwind": {
+                            "path": "$history",
+                            "preserveNullAndEmptyArrays": False,
+                        }
+                    },
+                    {"$group": {"_id": f"$history.{field}", "clicks": {"$sum": 1}}},
+                    {"$sort": {"clicks": -1}},
+                ]
+            )
+            return await cursor.to_list(length=None)
+
         first_sources = await _count_by("first_source")
         last_sources = await _count_by("last_source")
+        first_utm_sources = await _count_by("first_utm_source")
+        last_utm_sources = await _count_by("last_utm_source")
+        first_utm_campaigns = await _count_by("first_utm_campaign")
+        last_utm_campaigns = await _count_by("last_utm_campaign")
 
-        clicks_by_source_cursor = self.user_sources.aggregate(
+        clicks_by_raw = await _count_history("source")
+        clicks_by_utm_source = await _count_history("utm_source")
+        clicks_by_utm_campaign = await _count_history("utm_campaign")
+
+        # Pair: source + campaign for "email × event_1_aug..." breakdown
+        pair_cursor = self.user_sources.aggregate(
             [
-                {"$unwind": {"path": "$history", "preserveNullAndEmptyArrays": False}},
-                {"$group": {"_id": "$history.source", "clicks": {"$sum": 1}}},
+                {
+                    "$unwind": {
+                        "path": "$history",
+                        "preserveNullAndEmptyArrays": False,
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": {
+                            "utm_source": "$history.utm_source",
+                            "utm_campaign": "$history.utm_campaign",
+                        },
+                        "clicks": {"$sum": 1},
+                    }
+                },
                 {"$sort": {"clicks": -1}},
             ]
         )
-        clicks_by_source = await clicks_by_source_cursor.to_list(length=None)
+        clicks_by_pair = await pair_cursor.to_list(length=None)
 
         recent_cursor = self.event_logs.find({"event_type": "start_source"}).sort(
             "timestamp", -1
@@ -361,7 +459,14 @@ class App:
             "total_clicks": total_clicks,
             "first_sources": first_sources,
             "last_sources": last_sources,
-            "clicks_by_source": clicks_by_source,
+            "first_utm_sources": first_utm_sources,
+            "last_utm_sources": last_utm_sources,
+            "first_utm_campaigns": first_utm_campaigns,
+            "last_utm_campaigns": last_utm_campaigns,
+            "clicks_by_source": clicks_by_raw,
+            "clicks_by_utm_source": clicks_by_utm_source,
+            "clicks_by_utm_campaign": clicks_by_utm_campaign,
+            "clicks_by_pair": clicks_by_pair,
             "recent": recent,
         }
 
