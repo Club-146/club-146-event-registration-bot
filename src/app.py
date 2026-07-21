@@ -101,6 +101,8 @@ class RegisteredUser(BaseModel):
     user_id: Optional[int] = None
     username: Optional[str] = None
     graduate_type: GraduateType = GraduateType.GRADUATE
+    # Telegram deep-link payload from /start <payload> (e.g. email_campaign)
+    start_source: Optional[str] = None
 
 
 class FeedbackData(BaseModel):
@@ -135,6 +137,7 @@ class App:
     event_logs_collection_name = "event_logs"
     deleted_users_collection_name = "deleted_users"
     events_collection_name = "events"
+    user_sources_collection_name = "user_sources"
 
     def __init__(self, **kwargs):
         from src.export import SheetExporter
@@ -148,6 +151,7 @@ class App:
         self._event_logs = None
         self._deleted_users = None
         self._events_col = None
+        self._user_sources = None
         self._export_debounce_task: asyncio.Task | None = None
         self._export_debounce_seconds = 30
 
@@ -160,6 +164,7 @@ class App:
         _ = self.event_logs
         _ = self.deleted_users
         _ = self.events_col
+        _ = self.user_sources
 
         # Run database migrations (includes seeding new events + archiving old ones)
         from src.migrations import run_migrations
@@ -209,6 +214,85 @@ class App:
                 self.events_collection_name
             )
         return self._events_col
+
+    @property
+    def user_sources(self):
+        """Acquisition sources from Telegram deep links (?start=payload)."""
+        if self._user_sources is None:
+            self._user_sources = get_database().get_collection(
+                self.user_sources_collection_name
+            )
+        return self._user_sources
+
+    @staticmethod
+    def normalize_start_payload(raw: Optional[str]) -> Optional[str]:
+        """Telegram start payloads: 1–64 chars of A–Z a–z 0–9 _ -."""
+        if not raw:
+            return None
+        payload = raw.strip()
+        if not payload or len(payload) > 64:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", payload):
+            return None
+        return payload
+
+    async def record_start_source(
+        self,
+        user_id: int,
+        source: str,
+        username: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Persist deep-link start payload for attribution.
+
+        Keeps first_source (immutable) and last_source (updated each start),
+        plus a short history list. Also writes an event_logs entry.
+        """
+        payload = self.normalize_start_payload(source)
+        if not payload or user_id is None:
+            return None
+
+        now = datetime.now().isoformat()
+        existing = await self.user_sources.find_one({"user_id": user_id})
+        history_entry = {"source": payload, "at": now}
+
+        if existing:
+            await self.user_sources.update_one(
+                {"user_id": user_id},
+                {
+                    "$set": {
+                        "last_source": payload,
+                        "last_source_at": now,
+                        "username": username,
+                    },
+                    "$push": {
+                        "history": {
+                            "$each": [history_entry],
+                            "$slice": -50,
+                        }
+                    },
+                },
+            )
+        else:
+            await self.user_sources.insert_one(
+                {
+                    "user_id": user_id,
+                    "username": username,
+                    "first_source": payload,
+                    "first_source_at": now,
+                    "last_source": payload,
+                    "last_source_at": now,
+                    "history": [history_entry],
+                }
+            )
+
+        await self.save_event_log(
+            "start_source",
+            {"source": payload, "is_first": existing is None},
+            user_id,
+            username,
+        )
+        return payload
 
     # ---- Event methods ----
 
@@ -447,6 +531,11 @@ class App:
             "target_city": data.get("target_city"),
             "graduate_type": data.get("graduate_type"),
         }
+        if data.get("start_source"):
+            log_data["start_source"] = data["start_source"]
+        # Drop None start_source so we don't overwrite an existing stamp on update
+        if data.get("start_source") is None:
+            data.pop("start_source", None)
 
         # Check if user is already registered for this specific event
         is_update = False
@@ -1161,6 +1250,36 @@ class App:
     ) -> List[Dict]:
         """Get all users regardless of payment status."""
         return await self._get_users_base(event_id=event_id, active_only=active_only)
+
+    async def get_all_time_broadcast_users(
+        self, history_query: Optional[Dict] = None
+    ) -> List[Dict]:
+        """
+        One profile per Telegram user from active + deleted registrations.
+
+        Used for CRM broadcast to the full historical base (not only current
+        season). Prefer the active registration when both exist; otherwise the
+        most recent deleted row. Optional history_query filters both collections
+        the same way (city / event history).
+        """
+        query = history_query or {}
+        active_cursor = self.collection.find(query)
+        deleted_cursor = self.deleted_users.find(query)
+        active_rows = await active_cursor.to_list(length=None)
+        deleted_rows = await deleted_cursor.to_list(length=None)
+
+        by_user: Dict[int, Dict] = {}
+        # Deleted first, then active overwrites — active wins for the same user.
+        for row in deleted_rows:
+            user_id = row.get("user_id")
+            if user_id is not None:
+                by_user[user_id] = row
+        for row in active_rows:
+            user_id = row.get("user_id")
+            if user_id is not None:
+                by_user[user_id] = row
+
+        return list(by_user.values())
 
     async def _fix_database(self) -> Dict[str, int]:
         """

@@ -13,6 +13,7 @@ def mock_message():
     message.from_user.username = "test_user"
     message.chat = MagicMock()
     message.chat.id = 12345
+    message.text = "/start"
     return message
 
 
@@ -36,6 +37,7 @@ def mock_app():
     mock_app.log_registration_canceled = AsyncMock()
     mock_app.log_registration_completed = AsyncMock()
     mock_app.save_event_log = AsyncMock()
+    mock_app.record_start_source = AsyncMock(return_value=None)
     yield mock_app
 
 

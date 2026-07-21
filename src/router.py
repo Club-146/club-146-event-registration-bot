@@ -1413,6 +1413,8 @@ async def register_user(
     assert full_name is not None, "full_name must be set by this point"
     assert graduation_year is not None, "graduation_year must be set by this point"
     assert class_letter is not None, "class_letter must be set by this point"
+    state_data = await state.get_data()
+    start_source = App.normalize_start_payload(state_data.get("start_source"))
     registered_user = RegisteredUser(
         full_name=full_name,
         graduation_year=graduation_year,
@@ -1420,6 +1422,7 @@ async def register_user(
         target_city=target_city_value,
         event_id=event_id,
         graduate_type=graduate_type,
+        start_source=start_source,
     )
     await app.save_registered_user(registered_user, user_id=user_id, username=username)
 
@@ -1949,6 +1952,29 @@ async def _show_multi_event_welcome(
     await register_user(message, state, app, reuse_info=reuse_info)
 
 
+def extract_start_payload(message: Message) -> Optional[str]:
+    """
+    Parse Telegram deep-link payload from /start.
+
+    Deep links look like:
+      https://t.me/<bot>?start=email_campaign
+    which arrives as:
+      /start email_campaign
+      /start@bot_username email_campaign
+    """
+    raw = message.text
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text.startswith("/start"):
+        return None
+    # Drop command token (/start or /start@bot)
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    return App.normalize_start_payload(parts[1])
+
+
 @commands_menu.add_command("start", "Start the bot")
 @router.message(CommandStart())
 @router.message(
@@ -1959,17 +1985,28 @@ async def start_handler(message: Message, state: FSMContext, app: App):
     Main scenario flow.
     """
     assert message.from_user is not None
+    start_payload = extract_start_payload(message)
     if message.from_user:
+        log_data = {
+            "command": "/start",
+            "content": message.text,
+            "chat_type": message.chat.type,
+        }
+        if start_payload:
+            log_data["start_payload"] = start_payload
         await app.save_event_log(
             "command",
-            {
-                "command": "/start",
-                "content": message.text,
-                "chat_type": message.chat.type,
-            },
+            log_data,
             message.from_user.id,
             message.from_user.username,
         )
+        if start_payload:
+            await app.record_start_source(
+                message.from_user.id,
+                start_payload,
+                username=message.from_user.username,
+            )
+            await state.update_data(start_source=start_payload)
 
     if is_admin(message.from_user):
         result = await admin_handler(message, state, app=app)
