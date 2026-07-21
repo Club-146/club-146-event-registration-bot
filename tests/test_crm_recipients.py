@@ -150,10 +150,50 @@ async def test_notify_all_events_requests_active_recipient_scope(audience, metho
     get_users = AsyncMock(return_value=[{"user_id": 1}])
     setattr(app, method_name, get_users)
 
-    recipients, _ = await _get_notify_users(app, audience, None)
+    recipients, _ = await _get_notify_users(app, audience, None, scope="current")
 
     assert recipients == [{"user_id": 1}]
     get_users.assert_awaited_once_with(event_id=None, active_only=True)
+
+
+@pytest.mark.asyncio
+async def test_notify_all_time_scope_uses_full_historical_base():
+    app = MagicMock()
+    app.get_all_events = AsyncMock(
+        return_value=[
+            {"_id": "perm-2026", "city": "Пермь"},
+            {"_id": "perm-old", "city": "Пермь"},
+        ]
+    )
+    app.get_all_time_broadcast_users = AsyncMock(
+        return_value=[{"user_id": 1}, {"user_id": 2}, {"user_id": 3}]
+    )
+    event_map = {"perm-2026": {"city": "Пермь"}}
+
+    recipients, name = await _get_notify_users(
+        app, "all", "perm-2026", scope="all_time", event_map=event_map
+    )
+
+    assert len(recipients) == 3
+    assert "всей базы" in name
+    query = app.get_all_time_broadcast_users.await_args.args[0]
+    event_clause, city_clause = query["$or"]
+    assert set(event_clause["event_id"]["$in"]) == {"perm-2026", "perm-old"}
+    assert city_clause["target_city"]["$regex"] == "^Пермь"
+
+
+@pytest.mark.asyncio
+async def test_notify_all_time_all_cities_uses_empty_history_query():
+    app = MagicMock()
+    app.get_all_events = AsyncMock(return_value=[])
+    app.get_all_time_broadcast_users = AsyncMock(return_value=[{"user_id": 9}])
+
+    recipients, _ = await _get_notify_users(
+        app, "all", None, scope="all_time", event_map={}
+    )
+
+    assert recipients == [{"user_id": 9}]
+    app.get_all_time_broadcast_users.assert_awaited_once_with({})
 
 
 @pytest.mark.asyncio
