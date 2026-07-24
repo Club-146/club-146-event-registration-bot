@@ -78,6 +78,11 @@ Site event-announce mailer (`146.school` `event_announce.run_campaign`) attaches
 `?start=email__event_announce[_e{event_id}][_c{campaign_id}]` at send time  
 (unless the form URL already has `start=`). Website `utm_*` is only for 146.school links.
 
+**Site TG button** («Зарегистрироваться в Telegram» on `/` and `/events`): filter  
+`telegram_reg` maps page query `utm_*` → bot `?start=`  
+(`event_links.telegram_start_from_utm` / `telegram_registration_href`).  
+`utm_medium=email` → source `email`; organic (no utm) → `site__events`.
+
 **Planned (not this feature):** registration outside Telegram — website first, then Max/VK — needs DB unify; see  
 `~/work/projects/146.school/docs/research-multi-channel-event-registration.md`.
 
