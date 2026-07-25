@@ -375,18 +375,17 @@ async def list_upcoming_reminder_plan(
     app, *, now: Optional[datetime] = None, days_ahead: int = 14
 ) -> list[dict]:
     """Plan rows for admin UI: next N days of previews + sends."""
-    from src.payment_timeline import badge_deadline, food_deadline
+    from src.payment_timeline import reminder_send_day
 
     now = now or datetime.now()
     plan = []
     events = _eligible_events(await app.get_all_events())
     for event in events:
         eid = _event_id(event)
-        for kind, dl_fn in (("d4", food_deadline), ("d2", badge_deadline)):
-            dl = dl_fn(event)
-            if not dl:
+        for kind in ("d4", "d2"):
+            send_day = reminder_send_day(event, kind)
+            if not send_day:
                 continue
-            send_day = dl.date()
             preview_day = send_day - timedelta(days=1)
             if send_day < now.date() or send_day > now.date() + timedelta(
                 days=days_ahead

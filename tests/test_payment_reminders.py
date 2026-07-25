@@ -50,8 +50,10 @@ async def test_send_payment_reminders_d4_marks_flag():
             new=AsyncMock(),
         ),
     ):
+        # Food-only d4 (no early bird on this event): food cutoff Jul 28 →
+        # reminder Jul 27. Badge alone would be Jul 28 — d4 wins only if due.
         stats = await send_payment_reminders(
-            app, bot, now=datetime(2026, 7, 28, 9, 0), dry_run=False
+            app, bot, now=datetime(2026, 7, 27, 9, 0), dry_run=False
         )
     assert stats["d4"] == 1
     assert stats["d2"] == 0
@@ -89,7 +91,7 @@ async def test_send_payment_reminders_skips_already_sent():
         new=AsyncMock(return_value={"paused": False}),
     ):
         stats = await send_payment_reminders(
-            app, bot, now=datetime(2026, 7, 28, 9, 0), dry_run=False
+            app, bot, now=datetime(2026, 7, 27, 9, 0), dry_run=False
         )
     assert stats["skipped"] == 1
     assert stats["d4"] == 0
@@ -115,7 +117,7 @@ async def test_send_payment_reminders_respects_pause():
         new=AsyncMock(return_value={"paused": True}),
     ):
         stats = await send_payment_reminders(
-            app, bot, now=datetime(2026, 7, 28, 9, 0)
+            app, bot, now=datetime(2026, 7, 27, 9, 0)
         )
     assert stats["paused"] == 1
     bot.send_message.assert_not_awaited()
@@ -160,13 +162,12 @@ async def test_force_send_now_ignores_calendar_and_pause():
 
 
 def test_admin_preview_kinds_day_before_reminder():
+    # No early bird: food d4 send Jul 27 (cutoff Jul 28); badge d2 send Jul 28
     event = {"date": date(2026, 8, 1), "city": "Пермь"}
-    # D-4 send day = Jul 28 → preview Jul 27
-    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 27, 10)) == [
+    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 26, 10)) == [
         "d4"
     ]
-    # D-2 send day = Jul 30 → preview Jul 29
-    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 29, 10)) == [
+    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 27, 10)) == [
         "d2"
     ]
     assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 28, 10)) == []
@@ -212,8 +213,9 @@ async def test_send_admin_previews_marks_sent():
             new=AsyncMock(),
         ) as mark,
     ):
+        # Preview day for food d4 send Jul 27 = Jul 26
         stats = await send_admin_previews(
-            app, now=datetime(2026, 7, 27, 9, 0), dry_run=False
+            app, now=datetime(2026, 7, 26, 9, 0), dry_run=False
         )
     assert stats["previews"] == 1
     app.log_to_chat.assert_awaited()

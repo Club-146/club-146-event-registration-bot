@@ -194,7 +194,7 @@ def _season_adjective(event) -> str:
 def _check_early_bird(event) -> tuple[bool, object, int]:
     """Return (is_active, deadline_datetime|None, discount_amount).
 
-    Cutoff is shared with food planning (D-4 06:00) via payment_timeline.
+    Cutoff from event.early_bird_deadline (06:00) or default D-3 (badge-aligned).
     """
     from src.payment_timeline import early_bird_deadline_at, is_early_bird_active
 
@@ -422,13 +422,24 @@ async def _handle_too_expensive(
     regular_amount: int,
     graduate_type: str,
     state: FSMContext | None = None,
+    graduation_year: int | None = None,
 ):
     from src.payment_timeline import too_expensive_cancel_message
 
+    registrations = await app.get_user_registrations(user_id)
+    registration = next(
+        (reg for reg in registrations if reg.get("event_id") == event_id), None
+    )
+    year = graduation_year
+    if year is None and registration:
+        year = registration.get("graduation_year")
+
+    year_part = f", выпуск {year}" if year else ""
+    step = f"Отказ от оплаты: слишком дорого{year_part}, цена {discounted_amount}₽"
     await app.log_registration_step(
         user_id=user_id,
         username=username,
-        step="Отказ от оплаты: слишком дорого",
+        step=step,
     )
     await app.save_event_log(
         "payment_action",
@@ -438,14 +449,10 @@ async def _handle_too_expensive(
             "amount": discounted_amount,
             "regular_amount": regular_amount,
             "graduate_type": graduate_type,
+            "graduation_year": year,
         },
         user_id,
         username,
-    )
-
-    registrations = await app.get_user_registrations(user_id)
-    registration = next(
-        (reg for reg in registrations if reg.get("event_id") == event_id), None
     )
 
     if registration:
@@ -1132,6 +1139,7 @@ async def process_payment(
                 regular_amount,
                 graduate_type,
                 state=state,
+                graduation_year=graduation_year,
             )
             return False
 

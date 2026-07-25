@@ -89,17 +89,22 @@ def _format_event_summary(event: dict, reg_count: int = 0) -> str:
             f"🎓 Бесплатно для: {', '.join(n for n in names if n is not None)}"
         )
 
-    # Early bird info (cutoff = food planning D-4 06:00)
+    # Early bird info (stored date or D-4 default)
     eb_discount = event.get("early_bird_discount", 0)
     if eb_discount > 0:
         from src.payment_timeline import early_bird_deadline_at, format_deadline_ru
 
         eb_at = early_bird_deadline_at(event)
-        deadline_str = format_deadline_ru(eb_at) if eb_at else "как срок заказа еды (D-4)"
-        lines.append(
-            f"🐦 Ранняя регистрация: скидка {eb_discount}₽ до {deadline_str} "
-            f"(= срок заказа еды)"
-        )
+        deadline_str = format_deadline_ru(eb_at) if eb_at else "—"
+        lines.append(f"🐦 Ранняя регистрация: скидка {eb_discount}₽ до {deadline_str}")
+
+    from src.payment_timeline import ask_bring_food_enabled
+
+    food_on = ask_bring_food_enabled(event)
+    lines.append(
+        "🥗 Просить принести еду при поздней оплате: "
+        + ("да" if food_on else "нет")
+    )
 
     # Guest settings
     if event.get("guests_enabled"):
@@ -440,21 +445,22 @@ async def _collect_early_bird(
 
     deadline_resp = await ask_user_raw(
         chat_id,
-        "🐦 Дедлайн ранней регистрации (ДД.ММ.ГГГГ):",
+        "🐦 Дедлайн ранней регистрации (ДД.ММ.ГГГГ, cutoff 06:00).\n"
+        "Пусто или 0 = за 3 дня до встречи (тот же день, что бейдж):",
         state=state,
         timeout=None,
     )
     early_bird_deadline = None
     if deadline_resp and deadline_resp.text:
-        try:
-            early_bird_deadline = datetime.strptime(
-                deadline_resp.text.strip(), "%d.%m.%Y"
-            )
-        except ValueError:
-            await send_safe(
-                chat_id,
-                "⚠️ Неверный формат даты, скидка будет без дедлайна.",
-            )
+        raw = deadline_resp.text.strip()
+        if raw and raw != "0":
+            try:
+                early_bird_deadline = datetime.strptime(raw, "%d.%m.%Y")
+            except ValueError:
+                await send_safe(
+                    chat_id,
+                    "⚠️ Неверный формат даты — будет дефолт D-3 (как бейдж).",
+                )
 
     return {
         "early_bird_discount": early_bird_discount,
@@ -846,7 +852,7 @@ async def _handle_edit_early_bird(
         chat_id,
         f"Текущие настройки ранней регистрации:\n"
         f"• Скидка: {current_discount}₽\n"
-        f"• Дедлайн: {deadline_str}\n\n"
+        f"• Дедлайн: {deadline_str} (cutoff 06:00; пусто = D-3, как бейдж)\n\n"
         f"Что изменить?",
         choices={
             "discount": "Изменить скидку",
@@ -874,17 +880,56 @@ async def _handle_edit_early_bird(
     elif eb_action == "deadline":
         resp = await ask_user_raw(
             chat_id,
-            f"Текущий дедлайн: {deadline_str}\nВведите новый (ДД.ММ.ГГГГ):",
+            f"Текущий дедлайн: {deadline_str}\n"
+            "Введите новый (ДД.ММ.ГГГГ) — скидка до 06:00 этого дня.\n"
+            "Или «0» чтобы сбросить на D-3 (как бейдж) от даты встречи:",
             state=state,
             timeout=None,
         )
         if resp and resp.text:
-            try:
-                new_deadline = datetime.strptime(resp.text.strip(), "%d.%m.%Y")
-                await app.update_event(event_id, {"early_bird_deadline": new_deadline})
-                await send_safe(chat_id, "✅ Дедлайн обновлён.")
-            except ValueError:
-                await send_safe(chat_id, "❌ Неверный формат. Используйте ДД.ММ.ГГГГ")
+            raw = resp.text.strip()
+            if raw == "0":
+                await app.update_event(event_id, {"early_bird_deadline": None})
+                await send_safe(chat_id, "✅ Дедлайн сброшен (D-3 / как бейдж).")
+            else:
+                try:
+                    new_deadline = datetime.strptime(raw, "%d.%m.%Y")
+                    await app.update_event(
+                        event_id, {"early_bird_deadline": new_deadline}
+                    )
+                    await send_safe(chat_id, "✅ Дедлайн обновлён.")
+                except ValueError:
+                    await send_safe(
+                        chat_id, "❌ Неверный формат. Используйте ДД.ММ.ГГГГ"
+                    )
+
+
+async def _handle_edit_ask_bring_food(
+    chat_id: int, state: FSMContext, app: App, event: dict, event_id: str
+) -> None:
+    from src.payment_timeline import ask_bring_food_enabled
+
+    current = ask_bring_food_enabled(event)
+    choice = await ask_user_choice(
+        chat_id,
+        "Просить участников принести еду при поздней оплате?\n"
+        f"Сейчас: {'включено' if current else 'выключено'}.\n\n"
+        "Если выключено — в «Оплачу позже» и напоминаниях не будет текста "
+        "про общий заказ / «принесите еду с собой». Фича остаётся для других встреч.",
+        choices={
+            "on": "Включить",
+            "off": "Выключить",
+            "back": "Назад",
+        },
+        state=state,
+        timeout=None,
+    )
+    if choice == "on":
+        await app.update_event(event_id, {"ask_bring_food": True})
+        await send_safe(chat_id, "✅ Просьба принести еду при поздней оплате: вкл.")
+    elif choice == "off":
+        await app.update_event(event_id, {"ask_bring_food": False})
+        await send_safe(chat_id, "✅ Просьба принести еду при поздней оплате: выкл.")
 
 
 async def _handle_edit_guests(
@@ -1041,6 +1086,7 @@ async def _handle_edit_event(
             "image": "Изображение",
             "pricing": "Настройки оплаты",
             "early_bird": "Ранняя регистрация",
+            "ask_bring_food": "Еда при поздней оплате",
             "guests": "Настройки гостей",
             "templates": "Тексты сообщений",
             "back": "Назад",
@@ -1071,6 +1117,8 @@ async def _handle_edit_event(
         await _handle_edit_field_pricing(chat_id, state, app, event, event_id)
     elif field == "early_bird":
         await _handle_edit_early_bird(chat_id, state, app, event, event_id)
+    elif field == "ask_bring_food":
+        await _handle_edit_ask_bring_food(chat_id, state, app, event, event_id)
     elif field == "guests":
         await _handle_edit_guests(chat_id, state, app, event, event_id)
     elif field == "templates":

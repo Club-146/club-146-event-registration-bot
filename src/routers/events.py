@@ -93,6 +93,9 @@ async def create_event_handler(message: Message, state: FSMContext, app: App):
     early_bird_data = await _collect_early_bird(message.chat.id, state, pricing_choice)
     event_data.update(early_bird_data)
 
+    # Default on for new events; admin can turn off in manage_events.
+    event_data["ask_bring_food"] = True
+
     guest_data = await _collect_guest_settings(message.chat.id, state)
     event_data.update(guest_data)
 

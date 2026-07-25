@@ -133,9 +133,9 @@ class TestFormatEventSummary:
         }
         result = _format_event_summary(event)
         assert "500" in result
-        # Early bird = food D-4 06:00 → 18.03.2026
-        assert "18.03.2026" in result
-        assert "заказа еды" in result
+        # Early bird default D-3 06:00 → 19.03.2026 for event on 22.03
+        assert "19.03.2026" in result
+        assert "Ранняя регистрация" in result
 
     def test_guests_enabled(self):
         event = {
