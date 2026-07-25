@@ -1489,6 +1489,8 @@ async def register_user(
     assert full_name is not None, "full_name must be set by this point"
     assert graduation_year is not None, "graduation_year must be set by this point"
     assert class_letter is not None, "class_letter must be set by this point"
+    state_data = await state.get_data()
+    start_source = App.normalize_start_payload(state_data.get("start_source"))
     registered_user = RegisteredUser(
         full_name=full_name,
         graduation_year=graduation_year,
@@ -1496,6 +1498,7 @@ async def register_user(
         target_city=target_city_value,
         event_id=event_id,
         graduate_type=graduate_type,
+        start_source=start_source,
     )
     await app.save_registered_user(registered_user, user_id=user_id, username=username)
 
@@ -2050,6 +2053,29 @@ async def _show_multi_event_welcome(
     await register_user(message, state, app, reuse_info=reuse_info)
 
 
+def extract_start_payload(message: Message) -> Optional[str]:
+    """
+    Parse Telegram deep-link payload from /start.
+
+    Deep links look like:
+      https://t.me/<bot>?start=email_campaign
+    which arrives as:
+      /start email_campaign
+      /start@bot_username email_campaign
+    """
+    raw = message.text
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text.startswith("/start"):
+        return None
+    # Drop command token (/start or /start@bot)
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    return App.normalize_start_payload(parts[1])
+
+
 @commands_menu.add_command("start", "Start the bot")
 @router.message(CommandStart())
 @router.message(
@@ -2060,17 +2086,42 @@ async def start_handler(message: Message, state: FSMContext, app: App):
     Main scenario flow.
     """
     assert message.from_user is not None
+    start_payload = extract_start_payload(message)
     if message.from_user:
+        log_data = {
+            "command": "/start",
+            "content": message.text,
+            "chat_type": message.chat.type,
+        }
+        if start_payload:
+            log_data["start_payload"] = start_payload
         await app.save_event_log(
             "command",
-            {
-                "command": "/start",
-                "content": message.text,
-                "chat_type": message.chat.type,
-            },
+            log_data,
             message.from_user.id,
             message.from_user.username,
         )
+        # Attribution: campaign deep links count as clicks; bare /start is "direct"
+        # and only sets first_source if the user has no row yet (no history spam).
+        if start_payload:
+            await app.record_start_source(
+                message.from_user.id,
+                start_payload,
+                username=message.from_user.username,
+                count_as_click=True,
+            )
+            await state.update_data(start_source=start_payload)
+        else:
+            existing_source = await app.user_sources.find_one(
+                {"user_id": message.from_user.id}
+            )
+            if existing_source is None:
+                await app.record_start_source(
+                    message.from_user.id,
+                    App.DIRECT_SOURCE,
+                    username=message.from_user.username,
+                    count_as_click=False,
+                )
 
     if is_admin(message.from_user):
         result = await admin_handler(message, state, app=app)
@@ -2099,7 +2150,7 @@ async def start_handler(message: Message, state: FSMContext, app: App):
                 state=state,
             )
             if want_register:
-                existing_registration = await app.get_user_registration(
+                existing_registration = await app.get_profile_for_reuse(
                     message.from_user.id
                 )
                 await register_user(
@@ -2114,7 +2165,8 @@ async def start_handler(message: Message, state: FSMContext, app: App):
     if active_registrations:
         await handle_registered_user(message, state, active_registrations[0], app)
     else:
-        existing_registration = await app.get_user_registration(message.from_user.id)
+        # Soft-deleted (e.g. «too expensive») still prefill name/year on re-register.
+        existing_registration = await app.get_profile_for_reuse(message.from_user.id)
         if len(upcoming_events) == 1:
             await _show_single_event_welcome(
                 message, state, app, upcoming_events[0], existing_registration

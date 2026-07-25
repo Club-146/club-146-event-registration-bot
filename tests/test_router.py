@@ -13,6 +13,7 @@ def mock_message():
     message.from_user.username = "test_user"
     message.chat = MagicMock()
     message.chat.id = 12345
+    message.text = "/start"
     return message
 
 
@@ -26,7 +27,9 @@ def mock_app():
     mock_app = MagicMock()
     # Configure async src mocks with AsyncMock
     mock_app.get_user_registration = AsyncMock(return_value=None)
+    mock_app.get_profile_for_reuse = AsyncMock(return_value=None)
     mock_app.get_user_registrations = AsyncMock(return_value=[])
+    mock_app.get_user_active_registrations = AsyncMock(return_value=[])
     mock_app.log_registration_step = AsyncMock(return_value=None)
     mock_app.save_registered_user = AsyncMock()
     mock_app.export_registered_users_to_google_sheets = AsyncMock()
@@ -34,6 +37,11 @@ def mock_app():
     mock_app.log_registration_canceled = AsyncMock()
     mock_app.log_registration_completed = AsyncMock()
     mock_app.save_event_log = AsyncMock()
+    mock_app.record_start_source = AsyncMock(return_value=None)
+    mock_app.user_sources = MagicMock()
+    mock_app.user_sources.find_one = AsyncMock(return_value={"user_id": 12345})
+    mock_app.BEFORE_TRACKING_SOURCE = "before_tracking"
+    mock_app.DIRECT_SOURCE = "direct"
     yield mock_app
 
 
@@ -98,14 +106,14 @@ async def test_start_handler_existing_summer_user(
     )
     mock_app.is_event_passed = MagicMock(return_value=False)
     mock_app.get_user_active_registrations = AsyncMock(return_value=[])
-    mock_app.get_user_registration = AsyncMock(
-        return_value={
-            "full_name": "Test User",
-            "graduation_year": 2010,
-            "class_letter": "A",
-            "target_city": "Пермь (Летняя встреча 2025)",
-        }
-    )
+    profile = {
+        "full_name": "Test User",
+        "graduation_year": 2010,
+        "class_letter": "A",
+        "target_city": "Пермь (Летняя встреча 2025)",
+    }
+    mock_app.get_user_registration = AsyncMock(return_value=profile)
+    mock_app.get_profile_for_reuse = AsyncMock(return_value=profile)
 
     # Mock ask_user_choice to simulate user cancelling
     with patch("src.router.ask_user_choice") as mock_ask:

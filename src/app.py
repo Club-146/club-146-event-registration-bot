@@ -6,7 +6,7 @@ from enum import Enum
 from loguru import logger
 from pydantic import SecretStr, BaseModel, Field
 from pydantic_settings import BaseSettings
-from typing import Optional, Tuple, List, Dict
+from typing import Any, Optional, Tuple, List, Dict
 
 from botspot import get_database
 from botspot.utils import send_safe
@@ -80,6 +80,9 @@ class AppSettings(BaseSettings):
     payment_name: str
     # Personal /donate pay links. Prod default; override on Coolify dev if needed.
     payment_site_base_url: str = "https://146.school"
+    # Vision model for receipt amount + Maria-vs-site detection (litellm id).
+    # Sonnet preferred — Haiku misclassified receipts in practice.
+    payment_parse_model: str = "anthropic/claude-sonnet-4-6"
 
     # August 1 website checkout/ticket bridge. This is deliberately disabled
     # unless every value is configured in the bot environment.
@@ -109,6 +112,8 @@ class RegisteredUser(BaseModel):
     user_id: Optional[int] = None
     username: Optional[str] = None
     graduate_type: GraduateType = GraduateType.GRADUATE
+    # Telegram deep-link payload from /start <payload> (e.g. email_campaign)
+    start_source: Optional[str] = None
 
 
 class FeedbackData(BaseModel):
@@ -143,6 +148,11 @@ class App:
     event_logs_collection_name = "event_logs"
     deleted_users_collection_name = "deleted_users"
     events_collection_name = "events"
+    user_sources_collection_name = "user_sources"
+    # Synthetic first_source for users who existed before deep-link tracking.
+    BEFORE_TRACKING_SOURCE = "before_tracking"
+    # Bare /start without ?start= payload (opened via @username / menu).
+    DIRECT_SOURCE = "direct"
 
     def __init__(self, **kwargs):
         from src.export import SheetExporter
@@ -156,6 +166,7 @@ class App:
         self._event_logs = None
         self._deleted_users = None
         self._events_col = None
+        self._user_sources = None
         self._export_debounce_task: asyncio.Task | None = None
         self._export_debounce_seconds = 30
         self._event_payment_sync_task: asyncio.Task | None = None
@@ -169,6 +180,7 @@ class App:
         _ = self.event_logs
         _ = self.deleted_users
         _ = self.events_col
+        _ = self.user_sources
 
         # Run database migrations (includes seeding new events + archiving old ones)
         from src.migrations import run_migrations
@@ -235,6 +247,272 @@ class App:
                 self.events_collection_name
             )
         return self._events_col
+
+    @property
+    def user_sources(self):
+        """Acquisition sources from Telegram deep links (?start=payload)."""
+        if self._user_sources is None:
+            self._user_sources = get_database().get_collection(
+                self.user_sources_collection_name
+            )
+        return self._user_sources
+
+    @staticmethod
+    def normalize_start_payload(raw: Optional[str]) -> Optional[str]:
+        """Telegram start payloads: 1–64 chars of A–Z a–z 0–9 _ -."""
+        if not raw:
+            return None
+        payload = raw.strip()
+        if not payload or len(payload) > 64:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", payload):
+            return None
+        return payload
+
+    @staticmethod
+    def parse_start_attribution(
+        raw: Optional[str],
+    ) -> Optional[Dict[str, Optional[str]]]:
+        """
+        Parse Telegram deep-link payload into UTM-like labels.
+
+        Encoding (Telegram forbids ``=`` / ``&`` in start payloads; max 64 chars):
+
+            {utm_source}__{utm_campaign}
+            {utm_source}__{utm_campaign}__{utm_content}
+
+        Examples::
+
+            email__event_1_aug_26_invite_1
+            → utm_source=email, utm_campaign=event_1_aug_26_invite_1
+
+            group_chat
+            → utm_source=group_chat, utm_campaign=None  (legacy single token)
+
+        Double underscore ``__`` is the field separator; single ``_`` is allowed
+        inside each label (campaign slugs like ``event_1_aug_26_invite_1``).
+        """
+        payload = App.normalize_start_payload(raw)
+        if not payload:
+            return None
+
+        parts = [p for p in payload.split("__") if p]
+        if not parts:
+            return None
+
+        utm_source = parts[0]
+        utm_campaign = parts[1] if len(parts) >= 2 else None
+        utm_content = parts[2] if len(parts) >= 3 else None
+        # If more than 3 segments, fold the rest into content.
+        if len(parts) > 3:
+            utm_content = "__".join(parts[2:])
+
+        return {
+            "raw": payload,
+            "utm_source": utm_source,
+            "utm_campaign": utm_campaign,
+            "utm_content": utm_content,
+        }
+
+    async def record_start_source(
+        self,
+        user_id: int,
+        source: str,
+        username: Optional[str] = None,
+        *,
+        count_as_click: bool = True,
+    ) -> Optional[str]:
+        """
+        Persist acquisition source for a user.
+
+        - first_source / first_utm_* are immutable once set
+        - last_source / last_utm_* update on every tracked click
+        - history keeps recent clicks (up to 100) when count_as_click=True
+        - every click is also written to event_logs (type start_source)
+
+        Synthetic sources:
+        - before_tracking — backfilled for users known before attribution existed
+        - direct — bare /start without a deep-link payload
+        """
+        attrs = self.parse_start_attribution(source)
+        if not attrs or user_id is None:
+            return None
+
+        payload = attrs["raw"]
+        assert payload is not None
+        now = datetime.now().isoformat()
+        existing = await self.user_sources.find_one({"user_id": user_id})
+        history_entry = {
+            "source": payload,
+            "utm_source": attrs["utm_source"],
+            "utm_campaign": attrs["utm_campaign"],
+            "utm_content": attrs["utm_content"],
+            "at": now,
+        }
+        is_first = existing is None
+
+        last_fields = {
+            "last_source": payload,
+            "last_source_at": now,
+            "last_utm_source": attrs["utm_source"],
+            "last_utm_campaign": attrs["utm_campaign"],
+            "last_utm_content": attrs["utm_content"],
+            "username": username,
+        }
+
+        if existing:
+            # Heal rows created before structured utm_* fields existed.
+            if not existing.get("first_utm_source"):
+                first_attrs = (
+                    self.parse_start_attribution(existing.get("first_source")) or {}
+                )
+                if first_attrs.get("utm_source"):
+                    last_fields.setdefault(
+                        "first_utm_source", first_attrs["utm_source"]
+                    )
+                    last_fields.setdefault(
+                        "first_utm_campaign", first_attrs.get("utm_campaign")
+                    )
+                    last_fields.setdefault(
+                        "first_utm_content", first_attrs.get("utm_content")
+                    )
+            update: Dict = {"$set": last_fields}
+            if count_as_click:
+                update["$push"] = {
+                    "history": {
+                        "$each": [history_entry],
+                        "$slice": -100,
+                    }
+                }
+                update["$inc"] = {"click_count": 1}
+            await self.user_sources.update_one({"user_id": user_id}, update)
+        else:
+            doc = {
+                "user_id": user_id,
+                "username": username,
+                "first_source": payload,
+                "first_source_at": now,
+                "first_utm_source": attrs["utm_source"],
+                "first_utm_campaign": attrs["utm_campaign"],
+                "first_utm_content": attrs["utm_content"],
+                **last_fields,
+                "history": [history_entry] if count_as_click else [],
+                "click_count": 1 if count_as_click else 0,
+            }
+            await self.user_sources.insert_one(doc)
+
+        if count_as_click:
+            await self.save_event_log(
+                "start_source",
+                {
+                    "source": payload,
+                    "utm_source": attrs["utm_source"],
+                    "utm_campaign": attrs["utm_campaign"],
+                    "utm_content": attrs["utm_content"],
+                    "is_first": is_first,
+                    "first_source": (
+                        payload if is_first else (existing or {}).get("first_source")
+                    ),
+                },
+                user_id,
+                username,
+            )
+        return payload
+
+    async def get_source_attribution_stats(self) -> Dict[str, Any]:
+        """Aggregate campaign deep-link stats for admin display."""
+        total_users = await self.user_sources.count_documents({})
+        total_clicks_cursor = self.user_sources.aggregate(
+            [
+                {
+                    "$group": {
+                        "_id": None,
+                        "clicks": {"$sum": {"$ifNull": ["$click_count", 0]}},
+                    }
+                }
+            ]
+        )
+        total_clicks_rows = await total_clicks_cursor.to_list(length=1)
+        total_clicks = total_clicks_rows[0]["clicks"] if total_clicks_rows else 0
+
+        async def _count_by(field: str) -> List[Dict]:
+            cursor = self.user_sources.aggregate(
+                [
+                    {"$group": {"_id": f"${field}", "count": {"$sum": 1}}},
+                    {"$sort": {"count": -1}},
+                ]
+            )
+            return await cursor.to_list(length=None)
+
+        async def _count_history(field: str) -> List[Dict]:
+            cursor = self.user_sources.aggregate(
+                [
+                    {
+                        "$unwind": {
+                            "path": "$history",
+                            "preserveNullAndEmptyArrays": False,
+                        }
+                    },
+                    {"$group": {"_id": f"$history.{field}", "clicks": {"$sum": 1}}},
+                    {"$sort": {"clicks": -1}},
+                ]
+            )
+            return await cursor.to_list(length=None)
+
+        first_sources = await _count_by("first_source")
+        last_sources = await _count_by("last_source")
+        first_utm_sources = await _count_by("first_utm_source")
+        last_utm_sources = await _count_by("last_utm_source")
+        first_utm_campaigns = await _count_by("first_utm_campaign")
+        last_utm_campaigns = await _count_by("last_utm_campaign")
+
+        clicks_by_raw = await _count_history("source")
+        clicks_by_utm_source = await _count_history("utm_source")
+        clicks_by_utm_campaign = await _count_history("utm_campaign")
+
+        # Pair: source + campaign for "email × event_1_aug..." breakdown
+        pair_cursor = self.user_sources.aggregate(
+            [
+                {
+                    "$unwind": {
+                        "path": "$history",
+                        "preserveNullAndEmptyArrays": False,
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": {
+                            "utm_source": "$history.utm_source",
+                            "utm_campaign": "$history.utm_campaign",
+                        },
+                        "clicks": {"$sum": 1},
+                    }
+                },
+                {"$sort": {"clicks": -1}},
+            ]
+        )
+        clicks_by_pair = await pair_cursor.to_list(length=None)
+
+        recent_cursor = self.event_logs.find({"event_type": "start_source"}).sort(
+            "timestamp", -1
+        )
+        recent = await recent_cursor.to_list(length=15)
+
+        return {
+            "total_users": total_users,
+            "total_clicks": total_clicks,
+            "first_sources": first_sources,
+            "last_sources": last_sources,
+            "first_utm_sources": first_utm_sources,
+            "last_utm_sources": last_utm_sources,
+            "first_utm_campaigns": first_utm_campaigns,
+            "last_utm_campaigns": last_utm_campaigns,
+            "clicks_by_source": clicks_by_raw,
+            "clicks_by_utm_source": clicks_by_utm_source,
+            "clicks_by_utm_campaign": clicks_by_utm_campaign,
+            "clicks_by_pair": clicks_by_pair,
+            "recent": recent,
+        }
 
     # ---- Event methods ----
 
@@ -365,14 +643,11 @@ class App:
                     regular_amount = base + rate * (ref_years // step)
                 formula_amount = regular_amount
 
-            # Early bird discount
-            early_bird_discount = event.get("early_bird_discount", 0)
-            early_bird_deadline = event.get("early_bird_deadline")
-            if (
-                early_bird_deadline
-                and datetime.now().date() <= early_bird_deadline.date()
-                and early_bird_discount > 0
-            ):
+            # Early bird = same cutoff as food planning (D-4 06:00)
+            from src.payment_timeline import is_early_bird_active
+
+            early_bird_discount = int(event.get("early_bird_discount") or 0)
+            if early_bird_discount > 0 and is_early_bird_active(event):
                 discount = early_bird_discount
                 discounted_amount = max(0, regular_amount - discount)
             else:
@@ -395,14 +670,10 @@ class App:
         minimum = event.get("guest_price_minimum", 0)
         regular_price = max(minimum, registrant_price)
 
-        # Apply early bird discount to guest price
-        early_bird_discount = event.get("early_bird_discount", 0)
-        early_bird_deadline = event.get("early_bird_deadline")
-        if (
-            early_bird_deadline
-            and datetime.now().date() <= early_bird_deadline.date()
-            and early_bird_discount > 0
-        ):
+        from src.payment_timeline import is_early_bird_active
+
+        early_bird_discount = int(event.get("early_bird_discount") or 0)
+        if early_bird_discount > 0 and is_early_bird_active(event):
             discounted_price = max(0, regular_price - early_bird_discount)
         else:
             discounted_price = regular_price
@@ -480,6 +751,11 @@ class App:
             "target_city": data.get("target_city"),
             "graduate_type": data.get("graduate_type"),
         }
+        if data.get("start_source"):
+            log_data["start_source"] = data["start_source"]
+        # Drop None start_source so we don't overwrite an existing stamp on update
+        if data.get("start_source") is None:
+            data.pop("start_source", None)
 
         # Check if user is already registered for this specific event
         is_update = False
@@ -531,6 +807,19 @@ class App:
         cursor = self.collection.find({"user_id": user_id}).sort("_id", -1)
         registrations = await cursor.to_list(length=1)
         return registrations[0] if registrations else None
+
+    async def get_profile_for_reuse(self, user_id: int) -> Optional[Dict]:
+        """Profile fields for re-registration: active reg first, else newest deleted.
+
+        Soft-deleted rows (e.g. «too expensive») keep full_name / year / letter so
+        the user does not retype the form.
+        """
+        active = await self.get_user_registration(user_id)
+        if active and active.get("full_name"):
+            return active
+        cursor = self.deleted_users.find({"user_id": user_id}).sort("_id", -1)
+        deleted = await cursor.to_list(length=1)
+        return deleted[0] if deleted else None
 
     async def delete_user_registration(
         self,
@@ -909,6 +1198,8 @@ class App:
         formula_amount: Optional[int] = None,
         username: Optional[str] = None,
         payment_status: Optional[str] = None,
+        payment_method: Optional[str] = None,
+        payment_method_source: Optional[str] = None,
     ):
         """
         Save payment information for a user
@@ -922,6 +1213,8 @@ class App:
             formula_amount: The payment amount calculated by formula
             username: Optional user's Telegram username for logging
             payment_status: Payment status (pending, confirmed, None for just registered)
+            payment_method: ``on_site`` | ``to_maria`` when known
+            payment_method_source: ``user`` | ``ai`` | etc.
         """
         # Update the user's registration with payment info
         update_data = {
@@ -935,6 +1228,10 @@ class App:
         # Add formula amount if provided
         if formula_amount is not None:
             update_data["formula_payment_amount"] = formula_amount
+        if payment_method is not None:
+            update_data["payment_method"] = payment_method
+        if payment_method_source is not None:
+            update_data["payment_method_source"] = payment_method_source
 
         # Get user registration for logging
         user_data = await self.collection.find_one(
@@ -953,6 +1250,10 @@ class App:
         }
         if formula_amount is not None:
             log_data["formula_amount"] = formula_amount
+        if payment_method is not None:
+            log_data["payment_method"] = payment_method
+        if payment_method_source is not None:
+            log_data["payment_method_source"] = payment_method_source
 
         await self.save_event_log("payment_info", log_data, user_id, username)
 
@@ -1194,6 +1495,36 @@ class App:
     ) -> List[Dict]:
         """Get all users regardless of payment status."""
         return await self._get_users_base(event_id=event_id, active_only=active_only)
+
+    async def get_all_time_broadcast_users(
+        self, history_query: Optional[Dict] = None
+    ) -> List[Dict]:
+        """
+        One profile per Telegram user from active + deleted registrations.
+
+        Used for CRM broadcast to the full historical base (not only current
+        season). Prefer the active registration when both exist; otherwise the
+        most recent deleted row. Optional history_query filters both collections
+        the same way (city / event history).
+        """
+        query = history_query or {}
+        active_cursor = self.collection.find(query)
+        deleted_cursor = self.deleted_users.find(query)
+        active_rows = await active_cursor.to_list(length=None)
+        deleted_rows = await deleted_cursor.to_list(length=None)
+
+        by_user: Dict[int, Dict] = {}
+        # Deleted first, then active overwrites — active wins for the same user.
+        for row in deleted_rows:
+            user_id = row.get("user_id")
+            if user_id is not None:
+                by_user[user_id] = row
+        for row in active_rows:
+            user_id = row.get("user_id")
+            if user_id is not None:
+                by_user[user_id] = row
+
+        return list(by_user.values())
 
     async def _fix_database(self) -> Dict[str, int]:
         """

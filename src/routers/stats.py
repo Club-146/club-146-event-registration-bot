@@ -1077,3 +1077,113 @@ async def show_payment_stats(message: Message, app: App):
         BufferedInputFile(buf.getvalue(), filename="payment_stats.png"),
         caption=caption,
     )
+
+
+def _format_source_counts(rows: list, *, value_key: str = "count") -> str:
+    if not rows:
+        return "  (нет данных)\n"
+    lines = []
+    for row in rows:
+        label = row.get("_id")
+        if label is None or label == "":
+            label = "—"
+        lines.append(f"  • <code>{label}</code>: <b>{row.get(value_key, 0)}</b>")
+    return "\n".join(lines) + "\n"
+
+
+def _format_pair_counts(rows: list) -> str:
+    if not rows:
+        return "  (нет данных)\n"
+    lines = []
+    for row in rows:
+        pair = row.get("_id") or {}
+        src = pair.get("utm_source") or "—"
+        camp = pair.get("utm_campaign") or "—"
+        lines.append(
+            f"  • <code>{src}</code> × <code>{camp}</code>: <b>{row.get('clicks', 0)}</b>"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _format_recent_source_clicks(recent: list) -> str:
+    if not recent:
+        return "  (пока нет кликов)\n"
+    lines = []
+    for entry in recent:
+        data = entry.get("data") or {}
+        raw = data.get("source", "?")
+        utm_s = data.get("utm_source")
+        utm_c = data.get("utm_campaign")
+        if utm_s and utm_c:
+            label = f"{utm_s} × {utm_c}"
+        elif utm_s:
+            label = utm_s
+        else:
+            label = raw
+        uid = entry.get("user_id", "?")
+        uname = entry.get("username") or ""
+        who = f"@{uname}" if uname else str(uid)
+        ts = (entry.get("timestamp") or "")[:19]
+        first_flag = "🆕 " if data.get("is_first") else ""
+        lines.append(f"  • {ts} {first_flag}<code>{label}</code> — {who}")
+    return "\n".join(lines) + "\n"
+
+
+@commands_menu.add_command(
+    "source_stats",
+    "Статистика кампаний (source / campaign)",
+    visibility=Visibility.ADMIN_ONLY,
+)
+@router.message(Command("source_stats"), AdminFilter())
+async def show_source_stats(message: Message, app: App):
+    """Campaign deep-link attribution: utm_source × utm_campaign breakdown."""
+    stats = await app.get_source_attribution_stats()
+
+    text = "<b>🔗 Кампании / deep links</b>\n\n"
+    text += f"👥 Пользователей с атрибуцией: <b>{stats['total_users']}</b>\n"
+    text += f"🖱 Всего кликов: <b>{stats['total_clicks']}</b>\n\n"
+
+    text += "<b>Клики по source (utm_source)</b>\n"
+    text += _format_source_counts(
+        stats.get("clicks_by_utm_source") or [], value_key="clicks"
+    )
+    text += "\n"
+
+    text += "<b>Клики по campaign (utm_campaign)</b>\n"
+    text += _format_source_counts(
+        stats.get("clicks_by_utm_campaign") or [], value_key="clicks"
+    )
+    text += "\n"
+
+    text += "<b>Клики source × campaign</b>\n"
+    text += _format_pair_counts(stats.get("clicks_by_pair") or [])
+    text += "\n"
+
+    text += "<b>Первый source (first_utm_source)</b>\n"
+    text += "<i>Оригинальный канал, не меняется. "
+    text += (
+        f"<code>{App.BEFORE_TRACKING_SOURCE}</code> = были в базе до трекинга.</i>\n"
+    )
+    text += _format_source_counts(
+        stats.get("first_utm_sources") or stats["first_sources"]
+    )
+    text += "\n"
+
+    text += "<b>Первый campaign (first_utm_campaign)</b>\n"
+    text += _format_source_counts(stats.get("first_utm_campaigns") or [])
+    text += "\n"
+
+    text += "<b>Полный payload (raw)</b>\n"
+    text += _format_source_counts(stats["clicks_by_source"], value_key="clicks")
+    text += "\n"
+
+    text += "<b>Последние клики</b>\n"
+    text += _format_recent_source_clicks(stats["recent"])
+    text += (
+        "\nФормат ссылки:\n"
+        "<code>t.me/bot?start=email__event_1_aug_26_invite_1</code>\n"
+        "→ source=<code>email</code>, campaign=<code>event_1_aug_26_invite_1</code>\n"
+        "Команда: /source_stats"
+    )
+
+    await send_safe(message.chat.id, text)

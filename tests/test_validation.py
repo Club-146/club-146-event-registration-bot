@@ -195,8 +195,8 @@ class TestCalculateEventPayment:
             "price_formula_reference_year": 2026,
             "price_formula_step": 1,
             "free_for_types": [],
+            "date": datetime(2099, 6, 1),
             "early_bird_discount": 500,
-            "early_bird_deadline": datetime(2099, 1, 1),
         }
         regular, discount, discounted, formula = app.calculate_event_payment(
             event, 2025
@@ -212,8 +212,8 @@ class TestCalculateEventPayment:
             "price_formula_reference_year": 2026,
             "price_formula_step": 1,
             "free_for_types": [],
+            "date": datetime(2020, 1, 10),
             "early_bird_discount": 500,
-            "early_bird_deadline": datetime(2020, 1, 1),
         }
         regular, discount, discounted, formula = app.calculate_event_payment(
             event, 2025
@@ -277,8 +277,8 @@ class TestCalculateEventPayment:
             "price_formula_reference_year": 2025,
             "price_formula_step": 3,
             "free_for_types": [],
+            "date": datetime(2099, 6, 1),
             "early_bird_discount": 500,
-            "early_bird_deadline": datetime(2099, 1, 1),
         }
         # base + rate * (15 // 3) = 1500 + 500*5 = 4000, early bird → 3500
         result = app.calculate_event_payment(event, 2020, "NON_GRADUATE")
@@ -337,8 +337,8 @@ class TestCalculateGuestPrice:
     def test_early_bird_applied(self, app):
         event = {
             "guest_price_minimum": 1000,
+            "date": datetime(2099, 6, 1),
             "early_bird_discount": 500,
-            "early_bird_deadline": datetime(2099, 1, 1),
         }
         # max(1000, 2000) = 2000 regular, minus 500 = 1500 discounted
         assert app.calculate_guest_price(event, 2000) == (2000, 1500)
@@ -346,15 +346,15 @@ class TestCalculateGuestPrice:
     def test_early_bird_expired(self, app):
         event = {
             "guest_price_minimum": 1000,
+            "date": datetime(2020, 1, 10),
             "early_bird_discount": 500,
-            "early_bird_deadline": datetime(2020, 1, 1),
         }
         assert app.calculate_guest_price(event, 2000) == (2000, 2000)
 
     def test_early_bird_floor_zero(self, app):
         event = {
+            "date": datetime(2099, 6, 1),
             "early_bird_discount": 9999,
-            "early_bird_deadline": datetime(2099, 1, 1),
         }
         assert app.calculate_guest_price(event, 500) == (500, 0)
 

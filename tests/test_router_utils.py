@@ -125,15 +125,17 @@ class TestFormatEventSummary:
         event = {
             "name": "Test",
             "city": "Москва",
+            "date": datetime(2026, 3, 22, 18, 0),
             "pricing_type": "free",
             "status": "upcoming",
             "enabled": True,
             "early_bird_discount": 500,
-            "early_bird_deadline": datetime(2026, 3, 18),
         }
         result = _format_event_summary(event)
         assert "500" in result
-        assert "18.03.2026" in result
+        # Early bird default D-3 06:00 → 19.03.2026 for event on 22.03
+        assert "19.03.2026" in result
+        assert "Ранняя регистрация" in result
 
     def test_guests_enabled(self):
         event = {

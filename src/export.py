@@ -228,88 +228,69 @@ class SheetExporter:
         all_events = await self.app.get_all_events()
         return _build_events_map(all_events)
 
-    async def export_registered_users(
-        self, silent=False, event_id: Optional[str] = None
-    ):
-        """Export registered users to Google Sheets."""
-        query = {"event_id": event_id} if event_id else {}
-        cursor = self.app.collection.find(query)
-        users = await cursor.to_list(length=None)
+    def _ensure_worksheet(self, spreadsheet, titles: list, title: str):
+        """Return worksheet, creating it if missing; mutates *titles*."""
+        if title not in titles:
+            spreadsheet.add_worksheet(title=title, rows=1000, cols=20)
+            titles.append(title)
+        return spreadsheet.worksheet(title)
 
-        if not users:
-            logger.info("Нет пользователей для экспорта")
-            if not silent:
-                return "Нет пользователей для экспорта"
-            return None
-
-        events_map = await self._prefetch_events_map()
-
-        # Connect to Google Sheets
-        client = self._get_client()
-        spreadsheet = client.open_by_key(self.spreadsheet_id)
-        worksheet_titles = [ws.title for ws in spreadsheet.worksheets()]
-
-        # Main sheet
-        if "Все встречи" not in worksheet_titles:
-            spreadsheet.add_worksheet(title="Все встречи", rows=1000, cols=20)
-        main_sheet = spreadsheet.worksheet("Все встречи")
+    def _prepare_registered_export_sheets(self, spreadsheet, events_map: Dict):
+        """Create/clear main, per-event, and graduate-type worksheets."""
+        titles = [ws.title for ws in spreadsheet.worksheets()]
+        main_sheet = self._ensure_worksheet(spreadsheet, titles, "Все встречи")
         main_sheet.clear()
 
-        # Dynamic event-specific sheets (replace hardcoded cities)
         event_sheets = {}
         for eid, ev in events_map.items():
-            tab_name = ev.get("name", ev.get("city", eid))[
-                :100
-            ]  # Sheets tab name limit
-            if tab_name not in worksheet_titles:
-                spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=20)
-                worksheet_titles.append(tab_name)
-            event_sheets[eid] = spreadsheet.worksheet(tab_name)
-            event_sheets[eid].clear()
+            tab_name = ev.get("name", ev.get("city", eid))[:100]
+            sheet = self._ensure_worksheet(spreadsheet, titles, tab_name)
+            sheet.clear()
+            event_sheets[eid] = sheet
 
-        # Graduate type sheets
         type_sheets = {}
-        for graduate_type in ["Выпускники", "Учителя", "Друзья", "Организаторы"]:
-            if graduate_type not in worksheet_titles:
-                spreadsheet.add_worksheet(title=graduate_type, rows=1000, cols=20)
-            type_sheets[graduate_type] = spreadsheet.worksheet(graduate_type)
-            type_sheets[graduate_type].clear()
+        for graduate_type in ("Выпускники", "Учителя", "Друзья", "Организаторы"):
+            sheet = self._ensure_worksheet(spreadsheet, titles, graduate_type)
+            sheet.clear()
+            type_sheets[graduate_type] = sheet
 
-        # Update all sheets with headers
         main_sheet.update([REGISTERED_HEADERS])
         for sheet in event_sheets.values():
             sheet.update([REGISTERED_HEADERS])
         for sheet in type_sheets.values():
             sheet.update([REGISTERED_HEADERS])
+        return main_sheet, event_sheets, type_sheets
 
-        # Build rows
+    @staticmethod
+    def _type_sheet_key(graduate_type: str) -> Optional[str]:
+        display = GRADUATE_TYPE_MAP.get(graduate_type, "Выпускник")
+        return {
+            "Выпускник": "Выпускники",
+            "Учитель": "Учителя",
+            "Друг": "Друзья",
+            "Организатор": "Организаторы",
+        }.get(display)
+
+    def _bucket_registered_rows(self, users, events_map, event_sheets, type_sheets):
         main_rows = []
         event_rows = {eid: [] for eid in event_sheets}
         type_rows = {gt: [] for gt in type_sheets}
-
         for user in users:
             event = events_map.get(user.get("event_id", ""))
             row = _build_registered_row(user, event)
             main_rows.append(row)
-
-            # Route to event sheet
             uid_event = user.get("event_id", "")
             if uid_event in event_rows:
                 event_rows[uid_event].append(row)
+            key = self._type_sheet_key(user.get("graduate_type", "GRADUATE"))
+            if key and key in type_rows:
+                type_rows[key].append(row)
+        return main_rows, event_rows, type_rows
 
-            # Route to type sheet
-            graduate_type = user.get("graduate_type", "GRADUATE")
-            graduate_type_display = GRADUATE_TYPE_MAP.get(graduate_type, "Выпускник")
-            if graduate_type_display == "Выпускник":
-                type_rows["Выпускники"].append(row)
-            elif graduate_type_display == "Учитель":
-                type_rows["Учителя"].append(row)
-            elif graduate_type_display == "Друг":
-                type_rows["Друзья"].append(row)
-            elif graduate_type_display == "Организатор":
-                type_rows["Организаторы"].append(row)
-
-        # Write data
+    @staticmethod
+    def _write_row_buckets(
+        main_sheet, main_rows, event_sheets, event_rows, type_sheets, type_rows
+    ):
         if main_rows:
             main_sheet.update(main_rows, "A2")
         for eid, rows in event_rows.items():
@@ -319,15 +300,35 @@ class SheetExporter:
             if rows:
                 type_sheets[gt].update(rows, "A2")
 
+    async def export_registered_users(
+        self, silent=False, event_id: Optional[str] = None
+    ):
+        """Export registered users to Google Sheets."""
+        query = {"event_id": event_id} if event_id else {}
+        users = await self.app.collection.find(query).to_list(length=None)
+
+        if not users:
+            logger.info("Нет пользователей для экспорта")
+            return None if silent else "Нет пользователей для экспорта"
+
+        events_map = await self._prefetch_events_map()
+        spreadsheet = self._get_client().open_by_key(self.spreadsheet_id)
+        main_sheet, event_sheets, type_sheets = self._prepare_registered_export_sheets(
+            spreadsheet, events_map
+        )
+        main_rows, event_rows, type_rows = self._bucket_registered_rows(
+            users, events_map, event_sheets, type_sheets
+        )
+        self._write_row_buckets(
+            main_sheet, main_rows, event_sheets, event_rows, type_sheets, type_rows
+        )
+
         message = (
             f"Успешно экспортировано {len(main_rows)} пользователей в Google Таблицы\n"
+            f"Доступно по ссылке: {main_sheet.url}"
         )
-        message += "Доступно по ссылке: " + main_sheet.url
         logger.success(message)
-
-        if not silent:
-            return message
-        return None
+        return None if silent else message
 
     async def export_to_csv(self, event_id: Optional[str] = None):
         """Export registered users to a CSV file."""

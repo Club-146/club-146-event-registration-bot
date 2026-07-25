@@ -467,3 +467,133 @@ async def bump_moscow_spb_base_price(app):
     )
     if spb_result.modified_count > 0:
         logger.info("Bumped SPb base price: 1000 → 1500.")
+
+
+# ============================================================
+# Migration: Seed first_source=before_tracking for known users
+# ============================================================
+@migration("007_backfill_before_tracking_sources")
+async def backfill_before_tracking_sources(app):
+    """Mark every known Telegram user with first_source=before_tracking if missing.
+
+    Users who already interacted with the bot before deep-link attribution
+    must keep a stable original source so later campaign clicks only update
+    last_source + history, never overwrite first_source.
+    """
+    source = app.BEFORE_TRACKING_SOURCE
+    now = datetime.now().isoformat()
+
+    active_ids = set(await app.collection.distinct("user_id"))
+    deleted_ids = set(await app.deleted_users.distinct("user_id"))
+    all_ids = {uid for uid in (active_ids | deleted_ids) if uid is not None}
+    already = set(await app.user_sources.distinct("user_id"))
+    missing = sorted(all_ids - already)
+
+    if not missing:
+        logger.info("before_tracking backfill: nothing to seed.")
+        return
+
+    docs = [
+        {
+            "user_id": uid,
+            "username": None,
+            "first_source": source,
+            "first_source_at": now,
+            "first_utm_source": source,
+            "first_utm_campaign": None,
+            "first_utm_content": None,
+            "last_source": source,
+            "last_source_at": now,
+            "last_utm_source": source,
+            "last_utm_campaign": None,
+            "last_utm_content": None,
+            "history": [],
+            "click_count": 0,
+            "seeded": "before_tracking_backfill",
+        }
+        for uid in missing
+    ]
+    # insert_many in chunks to avoid oversized batches
+    chunk = 500
+    inserted = 0
+    for i in range(0, len(docs), chunk):
+        result = await app.user_sources.insert_many(docs[i : i + chunk])
+        inserted += len(result.inserted_ids)
+    logger.info(
+        f"before_tracking backfill: seeded {inserted} users "
+        f"(known={len(all_ids)}, already_tracked={len(already)})."
+    )
+
+
+# ============================================================
+# Migration: Fill utm_* fields on rows created before structured parse
+# ============================================================
+@migration("008_backfill_utm_fields_from_raw")
+async def backfill_utm_fields_from_raw(app):
+    """Populate first/last utm_* from raw first_source/last_source when missing.
+
+    Migration 007 originally wrote only first_source/last_source. Later code
+    expects first_utm_source / first_utm_campaign for stats. Re-parse raw
+    payloads (including synthetic before_tracking / direct).
+    """
+    cursor = app.user_sources.find(
+        {
+            "$or": [
+                {"first_utm_source": {"$exists": False}},
+                {"first_utm_source": None},
+                {"last_utm_source": {"$exists": False}},
+                {"last_utm_source": None},
+            ]
+        }
+    )
+    rows = await cursor.to_list(length=None)
+    fixed = 0
+    for row in rows:
+        updates = {}
+        if not row.get("first_utm_source"):
+            attrs = app.parse_start_attribution(row.get("first_source")) or {}
+            if attrs.get("utm_source"):
+                updates["first_utm_source"] = attrs["utm_source"]
+                updates["first_utm_campaign"] = attrs.get("utm_campaign")
+                updates["first_utm_content"] = attrs.get("utm_content")
+        if not row.get("last_utm_source"):
+            attrs = app.parse_start_attribution(row.get("last_source")) or {}
+            if attrs.get("utm_source"):
+                updates["last_utm_source"] = attrs["utm_source"]
+                updates["last_utm_campaign"] = attrs.get("utm_campaign")
+                updates["last_utm_content"] = attrs.get("utm_content")
+        if updates:
+            await app.user_sources.update_one({"_id": row["_id"]}, {"$set": updates})
+            fixed += 1
+    logger.info(f"utm field backfill: updated {fixed} of {len(rows)} candidate rows.")
+
+
+# ============================================================
+# Migration: summer 2026 — no late-food; shared EB+badge D-3 (29.07)
+# ============================================================
+@migration("009_summer_2026_food_flag_and_early_bird")
+async def summer_2026_food_flag_and_early_bird(app):
+    """Maria/Petr Jul 2026 (updated same day):
+
+    - disable bring-food late-registry messaging for tursslet
+    - one shared cutoff for early bird + named badges: D-3 = 29.07 for 01.08
+    - one auto-reminder the day before that cutoff (no extra manual blast)
+
+    ask_bring_food defaults True when missing — set False for Aug 1 events.
+    """
+    # Match Aug 1 2026 events regardless of stored time component.
+    start = datetime(2026, 8, 1)
+    end = datetime(2026, 8, 2)
+    result = await app.events_col.update_many(
+        {"date": {"$gte": start, "$lt": end}},
+        {
+            "$set": {
+                "ask_bring_food": False,
+                "early_bird_deadline": datetime(2026, 7, 29),
+            }
+        },
+    )
+    logger.info(
+        f"summer 2026 food/early-bird: matched={result.matched_count} "
+        f"modified={result.modified_count}"
+    )

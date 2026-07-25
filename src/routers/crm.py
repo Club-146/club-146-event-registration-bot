@@ -78,8 +78,45 @@ _TEMPLATE_MARKERS = [
 ]
 
 
-async def _get_notify_users(app: App, audience: str, city_filter) -> tuple:
-    """Fetch the target user list and a display name for the audience."""
+def _all_time_history_query(city_filter, event_map: dict, all_events: list) -> dict:
+    """Mongo query for historical registrations in a city (or empty = all cities)."""
+    if city_filter is None or city_filter == "all":
+        return {}
+    ev = event_map.get(city_filter, {})
+    city = ev.get("city", "")
+    if not city:
+        return {"event_id": city_filter}
+    city_event_ids = [str(e["_id"]) for e in all_events if e.get("city") == city]
+    return {
+        "$or": [
+            {"event_id": {"$in": city_event_ids}},
+            {"target_city": {"$regex": f"^{re.escape(city)}"}},
+        ]
+    }
+
+
+async def _get_notify_users(
+    app: App,
+    audience: str,
+    city_filter,
+    *,
+    scope: str = "current",
+    event_map: Optional[dict] = None,
+) -> tuple:
+    """Fetch the target user list and a display name for the audience.
+
+    scope:
+      - current — only registrations for active/current events (paid/unpaid/all)
+      - all_time — full historical base (active + deleted), payment filters N/A
+    """
+    if scope == "all_time":
+        all_events = await app.get_all_events()
+        history_query = _all_time_history_query(
+            city_filter, event_map or {}, all_events
+        )
+        users = await app.get_all_time_broadcast_users(history_query)
+        return users, "пользователей из всей базы"
+
     if audience == "unpaid":
         users = await app.get_unpaid_users(
             event_id=city_filter, active_only=city_filter is None
@@ -199,24 +236,49 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
         await send_safe(message.chat.id, "❌ Ошибка: не удалось определить отправителя")
         return
 
-    # Step 1: audience
-    audience = await ask_user_choice(
+    # Step 1: base scope — current season vs full historical database
+    scope = await ask_user_choice(
         message.chat.id,
-        "Шаг 1: Кому отправить уведомление?",
+        "Шаг 1: Какую базу использовать?",
         choices={
-            "unpaid": "Неоплатившим пользователям",
-            "paid": "Оплатившим пользователям",
-            "all": "Всем пользователям",
+            "current": "Только текущие регистрации",
+            "all_time": "Вся база (все сезоны + удалённые)",
             "cancel": "Отмена",
         },
         state=state,
         timeout=None,
     )
-    if audience == "cancel":
+    if scope == "cancel":
         await send_safe(message.chat.id, "Операция отменена")
         return
 
-    # Step 2: city
+    # Step 2: payment audience (only for current-season registrations)
+    audience = "all"
+    if scope == "current":
+        audience = await ask_user_choice(
+            message.chat.id,
+            "Шаг 2: Кому отправить уведомление?",
+            choices={
+                "unpaid": "Неоплатившим пользователям",
+                "paid": "Оплатившим пользователям",
+                "all": "Всем пользователям",
+                "cancel": "Отмена",
+            },
+            state=state,
+            timeout=None,
+        )
+        if audience == "cancel":
+            await send_safe(message.chat.id, "Операция отменена")
+            return
+        city_step = "Шаг 3"
+        message_step = "Шаг 4"
+        confirm_step = "Шаг 5"
+    else:
+        city_step = "Шаг 2"
+        message_step = "Шаг 3"
+        confirm_step = "Шаг 4"
+
+    # City filter
     city_choices = {"all": "Все города", "cancel": "Отмена"}
     enabled_events = await app.get_enabled_events()
     event_map = {}
@@ -227,7 +289,7 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
 
     city = await ask_user_choice(
         message.chat.id,
-        "Шаг 2: Выберите город для рассылки",
+        f"{city_step}: Выберите город для рассылки",
         choices=city_choices,
         state=state,
         timeout=None,
@@ -236,10 +298,10 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
         await send_safe(message.chat.id, "Операция отменена")
         return
 
-    # Step 3: message text
+    # Message text
     response = await ask_user_raw(
         message.chat.id,
-        "Шаг 3: Введите текст сообщения для отправки\n\n"
+        f"{message_step}: Введите текст сообщения для отправки\n\n"
         "Доступные шаблоны для подстановки:\n"
         "- {name} - имя пользователя\n"
         "- {city} - название города\n"
@@ -267,7 +329,9 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
     )
 
     city_filter = city if city != "all" else None
-    users, audience_name = await _get_notify_users(app, audience, city_filter)
+    users, audience_name = await _get_notify_users(
+        app, audience, city_filter, scope=scope, event_map=event_map
+    )
 
     if not users:
         await status_msg.edit_text(
@@ -281,10 +345,10 @@ async def notify_users_handler(message: Message, state: FSMContext, app: App):
     )
     await status_msg.edit_text(preview)
 
-    # Step 4: confirm
+    # Confirm
     confirm = await ask_user_confirmation(
         message.chat.id,
-        f"Шаг 4: ⚠️ Вы собираетесь отправить сообщение {len(users)} пользователям. Продолжить?",
+        f"{confirm_step}: ⚠️ Вы собираетесь отправить сообщение {len(users)} пользователям. Продолжить?",
         state=state,
     )
     if not confirm:
@@ -408,28 +472,10 @@ async def _send_announcements(users_ids: list, announcement_text: str) -> tuple:
     return sent_count, failed_count
 
 
-async def announce_new_season_handler(message: Message, state: FSMContext, app: App):
-    """Announce new meetup season to users with audience and city controls."""
-    if not message.from_user:
-        await send_safe(message.chat.id, "❌ Ошибка: не удалось определить отправителя")
-        return
-
-    enabled_events = await app.get_enabled_events()
-    if not enabled_events:
-        await send_safe(
-            message.chat.id,
-            "⚠️ Нет активных встреч. Сначала создайте встречи через /create_event",
-        )
-        return
-
-    events_preview = "📅 Текущие активные встречи:\n"
-    for ev in enabled_events:
-        from src.router import get_event_date_display
-
-        events_preview += f"  • {ev.get('city', '?')} ({get_event_date_display(ev)})\n"
-    await send_safe(message.chat.id, events_preview)
-
-    # Step 1: audience scope
+async def _season_collect_audience(
+    message: Message, state: FSMContext, app: App, enabled_events: list
+) -> Optional[tuple]:
+    """Return (audience, city_filter, event_map, user_ids) or None if cancelled."""
     audience = await ask_user_choice(
         message.chat.id,
         "Шаг 1: Кому отправить анонс?",
@@ -443,9 +489,8 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
     )
     if audience == "cancel":
         await send_safe(message.chat.id, "Операция отменена.")
-        return
+        return None
 
-    # Step 2: city/event filter
     city_choices: Dict[str, Any] = {"all": "Все города / встречи", "cancel": "Отмена"}
     event_map = {}
     for ev in enabled_events:
@@ -462,14 +507,52 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
     )
     if city_filter == "cancel":
         await send_safe(message.chat.id, "Операция отменена.")
-        return
+        return None
 
     target_user_ids = await _build_recipient_list(app, audience, city_filter, event_map)
     if not target_user_ids:
         await send_safe(message.chat.id, "❌ Нет пользователей для рассылки.")
+        return None
+    return audience, city_filter, event_map, target_user_ids
+
+
+def _season_audience_desc(audience: str, city_filter: str, event_map: dict) -> str:
+    desc = (
+        "все пользователи за всё время"
+        if audience == "all_time"
+        else "текущие зарегистрированные"
+    )
+    if city_filter != "all" and city_filter in event_map:
+        desc += f" ({event_map[city_filter].get('city', city_filter)})"
+    return desc
+
+
+async def announce_new_season_handler(message: Message, state: FSMContext, app: App):
+    """Announce new meetup season to users with audience and city controls."""
+    if not message.from_user:
+        await send_safe(message.chat.id, "❌ Ошибка: не удалось определить отправителя")
         return
 
-    # Step 3: link
+    enabled_events = await app.get_enabled_events()
+    if not enabled_events:
+        await send_safe(
+            message.chat.id,
+            "⚠️ Нет активных встреч. Сначала создайте встречи через /create_event",
+        )
+        return
+
+    from src.router import get_event_date_display
+
+    events_preview = "📅 Текущие активные встречи:\n"
+    for ev in enabled_events:
+        events_preview += f"  • {ev.get('city', '?')} ({get_event_date_display(ev)})\n"
+    await send_safe(message.chat.id, events_preview)
+
+    collected = await _season_collect_audience(message, state, app, enabled_events)
+    if collected is None:
+        return
+    audience, city_filter, event_map, target_user_ids = collected
+
     link_resp = await ask_user_raw(
         message.chat.id,
         "Шаг 3: Введите ссылку на пост (или 'нет' чтобы пропустить):",
@@ -480,21 +563,13 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
     if link_resp and link_resp.text and link_resp.text.strip().lower() != "нет":
         post_link = link_resp.text.strip()
 
-    default_message = _build_default_announcement(enabled_events, post_link)
-
-    # Step 4: text
-    announcement_text = await _get_announcement_text(message, state, default_message)
+    announcement_text = await _get_announcement_text(
+        message, state, _build_default_announcement(enabled_events, post_link)
+    )
     if announcement_text is None:
         return
 
-    audience_desc = (
-        "все пользователи за всё время"
-        if audience == "all_time"
-        else "текущие зарегистрированные"
-    )
-    if city_filter != "all" and city_filter in event_map:
-        audience_desc += f" ({event_map[city_filter].get('city', city_filter)})"
-
+    audience_desc = _season_audience_desc(audience, city_filter, event_map)
     confirm = await ask_user_confirmation(
         message.chat.id,
         f"⚠️ Отправить анонс {len(target_user_ids)} пользователям?\n"
@@ -519,7 +594,6 @@ async def announce_new_season_handler(message: Message, state: FSMContext, app: 
     sent_count, failed_count = await _send_announcements(
         target_user_ids, announcement_text
     )
-
     await status_msg.edit_text(
         f"✅ Анонс отправлен!\n\n"
         f"📊 Статистика:\n"
