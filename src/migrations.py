@@ -597,3 +597,36 @@ async def summer_2026_food_flag_and_early_bird(app):
         f"summer 2026 food/early-bird: matched={result.matched_count} "
         f"modified={result.modified_count}"
     )
+
+
+# ============================================================
+# Migration: optional website_event_uid link on event documents
+# ============================================================
+@migration("010_add_website_event_uid")
+async def add_website_event_uid(app):
+    """Add the optional cross-system link field to every event document.
+
+    The website's SQL ``events`` table is the source of truth for events
+    (contract: 146.school/docs/events-people-data-integration.md, «Контракт по
+    событиям»). Its stable ``Event.uid`` is the cross-system key, and a bot
+    event document points at one via ``website_event_uid``.
+
+    This step only *declares* the field, defaulting to ``None``: it makes the
+    link explicit and queryable without asserting any particular mapping.
+    Binding a specific bot event to a specific website UID is per-environment
+    operational configuration — staging must never inherit production's UID —
+    so it is done separately with ``dev/set_website_event_uid.py``.
+
+    Additive and reversible; rollback is a single command documented in
+    ``docs/website-event-uid.md``:
+
+        db.events.updateMany({}, {$unset: {website_event_uid: ""}})
+    """
+    result = await app.events_col.update_many(
+        {"website_event_uid": {"$exists": False}},
+        {"$set": {"website_event_uid": None}},
+    )
+    logger.info(
+        f"website_event_uid: declared on {result.modified_count} event documents "
+        f"(matched={result.matched_count})."
+    )
