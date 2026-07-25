@@ -399,18 +399,19 @@ def test_check_early_bird_no_event_date():
 def test_check_early_bird_active():
     from datetime import datetime
 
-    from src.payment_timeline import food_deadline
+    from src.payment_timeline import early_bird_deadline_at
     from src.routers.payment import _check_early_bird
 
-    # Early bird follows food deadline (D-4 06:00), not a separate field.
+    # Stored early_bird_deadline is authoritative (06:00 that day).
     event = {
         "date": datetime(2099, 12, 31),
         "early_bird_discount": 300,
-        "early_bird_deadline": datetime(2000, 1, 1),  # ignored for timing
+        "early_bird_deadline": datetime(2099, 12, 20),
     }
     is_early, deadline, discount = _check_early_bird(event)
     assert is_early is True
-    assert deadline == food_deadline(event)
+    assert deadline == early_bird_deadline_at(event)
+    assert deadline == datetime(2099, 12, 20, 6, 0, 0)
     assert discount == 300
 
 
@@ -422,10 +423,27 @@ def test_check_early_bird_expired():
     event = {
         "date": datetime(2000, 1, 10),
         "early_bird_discount": 300,
-        "early_bird_deadline": datetime(2099, 1, 1),  # ignored
+        "early_bird_deadline": datetime(2000, 1, 1),  # already past
     }
     is_early, deadline, discount = _check_early_bird(event)
     assert is_early is False
+
+
+def test_check_early_bird_default_d3_aligned_with_badge():
+    from datetime import datetime
+
+    from src.payment_timeline import badge_deadline, deadline_at
+    from src.routers.payment import _check_early_bird
+
+    event = {
+        "date": datetime(2099, 12, 31),
+        "early_bird_discount": 300,
+    }
+    is_early, deadline, discount = _check_early_bird(event)
+    assert is_early is True
+    assert deadline == deadline_at(event, 3)
+    assert deadline == badge_deadline(event)
+    assert discount == 300
 
 
 def test_check_early_bird_zero_discount():

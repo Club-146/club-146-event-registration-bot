@@ -566,3 +566,34 @@ async def backfill_utm_fields_from_raw(app):
             await app.user_sources.update_one({"_id": row["_id"]}, {"$set": updates})
             fixed += 1
     logger.info(f"utm field backfill: updated {fixed} of {len(rows)} candidate rows.")
+
+
+# ============================================================
+# Migration: summer 2026 — no late-food; shared EB+badge D-3 (29.07)
+# ============================================================
+@migration("009_summer_2026_food_flag_and_early_bird")
+async def summer_2026_food_flag_and_early_bird(app):
+    """Maria/Petr Jul 2026 (updated same day):
+
+    - disable bring-food late-registry messaging for tursslet
+    - one shared cutoff for early bird + named badges: D-3 = 29.07 for 01.08
+    - one auto-reminder the day before that cutoff (no extra manual blast)
+
+    ask_bring_food defaults True when missing — set False for Aug 1 events.
+    """
+    # Match Aug 1 2026 events regardless of stored time component.
+    start = datetime(2026, 8, 1)
+    end = datetime(2026, 8, 2)
+    result = await app.events_col.update_many(
+        {"date": {"$gte": start, "$lt": end}},
+        {
+            "$set": {
+                "ask_bring_food": False,
+                "early_bird_deadline": datetime(2026, 7, 29),
+            }
+        },
+    )
+    logger.info(
+        f"summer 2026 food/early-bird: matched={result.matched_count} "
+        f"modified={result.modified_count}"
+    )
