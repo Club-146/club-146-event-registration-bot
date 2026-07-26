@@ -13,7 +13,6 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from datetime import datetime
 from loguru import logger
 from src import templates
 from src.app import App, GraduateType
@@ -21,6 +20,15 @@ from src.router import is_admin, commands_menu, get_event_date_display
 from src.routers.admin import PaymentInfo
 from src.ticket_cards import send_paid_ticket_card
 from src.user_interactions import ask_user_raw, ask_user_choice, ask_user_choice_raw
+from src.website_event_bridge import (
+    WebsiteBridgeError,
+    bridge_enabled_for,
+    bridge_requested,
+    confirmation_reference,
+    confirm_registration_payment,
+    send_website_ticket_links,
+    sync_registration_from_website,
+)
 from botspot.utils import send_safe
 
 # Create router
@@ -222,10 +230,10 @@ def _build_early_bird_payment_block(
     # Collapsed quote: formula + year price + discount (secondary detail).
     quote_parts: list[str] = ["расчет оплаты"]
     if include_formula:
-        quote_parts.append(f"{escape(str(city), quote=True)} → {escape(str(formula), quote=True)}")
-    quote_parts.append(
-        f"{escape(price_label, quote=True)}: {regular_amount} руб."
-    )
+        quote_parts.append(
+            f"{escape(str(city), quote=True)} → {escape(str(formula), quote=True)}"
+        )
+    quote_parts.append(f"{escape(price_label, quote=True)}: {regular_amount} руб.")
     quote_parts.append(f"При ранней регистрации скидка {discount} руб!")
     quote_body = "\n".join(quote_parts)
     # expandable = collapsed by default in Telegram clients that support it
@@ -250,6 +258,8 @@ async def _send_payment_info_messages(
     total_discounted_with_guests: int,
     full_name: str = "",
     graduation_year: int | str | None = None,
+    website_checkout: dict | None = None,
+    website_bridge_active: bool = False,
 ):
     """Send payment info in two user-visible messages (price+guests, then how to pay)."""
     from botspot.core.dependency_manager import get_dependency_manager
@@ -329,12 +339,35 @@ async def _send_payment_info_messages(
 
     # Same total the user is told to pay (early-bird + guests when applicable).
     pay_amount = total_discounted_with_guests if is_early else total_regular_with_guests
-    pay_url = build_pay_url(
-        app.settings.payment_site_base_url,
-        pay_amount,
-        full_name=full_name or "",
-        graduation_year=graduation_year,
-    )
+    payment_markup = None
+    if website_checkout:
+        path = website_checkout["group_status_path"]
+        base_url = app.settings.event_payments_website_api_base_url.rstrip("/")
+        website_amount = int(float(website_checkout.get("fixed_amount") or pay_amount))
+        pay_url = "Используйте кнопку оплаты ниже."
+        payment_markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"Оплатить {website_amount} ₽",
+                        url=f"{base_url}{path}",
+                    )
+                ]
+            ]
+        )
+    elif website_bridge_active:
+        # Never route an event admission through the website's Donation ledger.
+        # The bank-transfer + receipt path below remains available.
+        pay_url = (
+            "Оплата на сайте временно недоступна. Используйте запасной вариант ниже."
+        )
+    else:
+        pay_url = build_pay_url(
+            app.settings.payment_site_base_url,
+            pay_amount,
+            full_name=full_name or "",
+            graduation_year=graduation_year,
+        )
     payment_msg_part3 = templates.render(
         event,
         "payment_details",
@@ -344,7 +377,8 @@ async def _send_payment_info_messages(
             "name": app.settings.payment_name,
         },
     )
-    await send_safe(message.chat.id, payment_msg_part3)
+    # Keep the signed website payment button (bridge) with dev's shorter pacing.
+    await send_safe(message.chat.id, payment_msg_part3, reply_markup=payment_markup)
     await asyncio.sleep(1)
 
 
@@ -458,9 +492,20 @@ async def _handle_too_expensive(
     if registration:
         full_name = registration.get("full_name", "Unknown")
         # Soft-delete keeps the row in deleted_users so /start can reuse profile.
-        await app.delete_user_registration(
-            user_id, event_id, username=username, full_name=full_name
-        )
+        # Fail closed if the website ticket cannot be revoked: cancelling here
+        # while a valid admission survives on the site would let someone enter.
+        try:
+            await app.delete_user_registration(
+                user_id, event_id, username=username, full_name=full_name
+            )
+        except WebsiteBridgeError:
+            await send_safe(
+                message.chat.id,
+                "Не удалось безопасно отозвать билет на сайте, поэтому регистрация сохранена. "
+                "Администратор уже получил сообщение об ошибке; попробуйте отмену позже.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
         await app.log_registration_canceled(user_id, username, full_name, city)
         await send_safe(
             message.chat.id,
@@ -629,9 +674,7 @@ def _build_user_info_text(
     user_info = f"👤 Пользователь: {username or ''} (ID: {user_id})\n"
     user_info += f"📍 Город: {city}\n"
     if payment_method:
-        user_info += (
-            f"📍 Куда: {_payment_method_label(payment_method, source=payment_method_source)}\n"
-        )
+        user_info += f"📍 Куда: {_payment_method_label(payment_method, source=payment_method_source)}\n"
         if method_reason:
             user_info += f"💬 {escape(method_reason)}\n"
     if guests:
@@ -757,14 +800,22 @@ async def _forward_proof_to_events_chat(
     events_chat_id = app.settings.events_chat_id
     logger.info(f"Events chat ID: {events_chat_id}")
 
-    if discount > 0:
-        needs_to_pay = f"{discounted_amount} руб (без скидки — {regular_amount} руб)"
-    else:
-        needs_to_pay = f"{regular_amount} руб"
-
-    # Calc guest totals for display
+    # The amount arguments are full group totals so persistence and admin
+    # confirmation can never drop named guests. Derive registrant-only values
+    # solely for the explanatory caption.
     guest_total = sum(g.get("price", 0) for g in guests)
-    total_regular_with_guests = regular_amount + guest_total
+    guest_discounted_total = sum(
+        g.get("price_discounted", g.get("price", 0)) for g in guests
+    )
+    registrant_regular = max(0, regular_amount - guest_total)
+    registrant_discounted = max(0, discounted_amount - guest_discounted_total)
+    if registrant_discounted != registrant_regular:
+        needs_to_pay = (
+            f"{registrant_discounted} руб (без скидки — {registrant_regular} руб)"
+        )
+    else:
+        needs_to_pay = f"{registrant_regular} руб"
+    total_regular_with_guests = regular_amount
 
     user_registration = await app.collection.find_one(
         {"user_id": user_id, "event_id": event_id}
@@ -990,7 +1041,7 @@ async def process_payment(
     if registration_data and "graduate_type" in registration_data:
         graduate_type = registration_data["graduate_type"]
 
-    regular_amount, discount, discounted_amount, formula_amount = _get_payment_amounts(
+    regular_amount, _discount, discounted_amount, formula_amount = _get_payment_amounts(
         event, graduation_year, graduate_type
     )
     city = _get_city(event, registration_data)
@@ -998,6 +1049,43 @@ async def process_payment(
     total_regular_with_guests, total_discounted_with_guests = _calc_guest_totals(
         guests, regular_amount, discounted_amount
     )
+    guest_regular_total = sum(g.get("price", 0) for g in guests)
+    total_formula_with_guests = formula_amount + guest_regular_total
+    total_discount = max(0, total_regular_with_guests - total_discounted_with_guests)
+
+    try:
+        website_bridge_active = bridge_enabled_for(app.settings, event)
+    except WebsiteBridgeError as exc:
+        # An explicitly enabled but incomplete bridge must not fall back to the
+        # website Donation ledger. Bank transfer + receipt still works.
+        website_bridge_active = True
+        logger.error("Website checkout configuration is incomplete: {}", exc.code)
+    website_checkout = None
+    if website_bridge_active and registration_data:
+        try:
+            website_checkout = await sync_registration_from_website(
+                app, registration_data, event
+            )
+        except WebsiteBridgeError as exc:
+            logger.warning(
+                "Website checkout is unavailable; receipt fallback remains active: {}",
+                exc.code,
+            )
+
+    if (
+        website_checkout
+        and website_checkout.get("status") in ("paid", "waived")
+        and registration_data
+    ):
+        await send_safe(
+            message.chat.id,
+            "✅ Обязательный взнос уже подтвержден на 146.school. "
+            "Ваши именные билеты доступны ниже.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await send_website_ticket_links(message.chat.id, app, registration_data)
+        await send_paid_ticket_card(message.chat.id, registration_data, event)
+        return True
 
     # If user already sent a photo/PDF, skip prompts and process directly
     if pre_uploaded_response is not None:
@@ -1006,8 +1094,8 @@ async def process_payment(
             {
                 "action": "auto_payment_proof",
                 "city": city,
-                "amount": discounted_amount,
-                "regular_amount": regular_amount,
+                "amount": total_discounted_with_guests,
+                "regular_amount": total_regular_with_guests,
                 "graduate_type": graduate_type,
             },
             user_id,
@@ -1021,10 +1109,10 @@ async def process_payment(
             city,
             event_id,
             guests,
-            discount,
-            discounted_amount,
-            regular_amount,
-            formula_amount,
+            total_discount,
+            total_discounted_with_guests,
+            total_regular_with_guests,
+            total_formula_with_guests,
             graduate_type,
         )
 
@@ -1042,6 +1130,8 @@ async def process_payment(
             total_discounted_with_guests,
             full_name=full_name,
             graduation_year=graduation_year,
+            website_checkout=website_checkout,
+            website_bridge_active=website_bridge_active,
         )
 
     # 1–2: already paid → ask for proof; 3–4: defer / cancel (existing).
@@ -1057,8 +1147,8 @@ async def process_payment(
         {
             "action": "request_payment_proof",
             "city": city,
-            "amount": discounted_amount,
-            "regular_amount": regular_amount,
+            "amount": total_discounted_with_guests,
+            "regular_amount": total_regular_with_guests,
             "graduate_type": graduate_type,
         },
         user_id,
@@ -1091,10 +1181,10 @@ async def process_payment(
                 city,
                 event_id,
                 guests,
-                discount,
-                discounted_amount,
-                regular_amount,
-                formula_amount,
+                total_discount,
+                total_discounted_with_guests,
+                total_regular_with_guests,
+                total_formula_with_guests,
                 graduate_type,
                 payment_method="on_site",
             )
@@ -1107,10 +1197,10 @@ async def process_payment(
                 city,
                 event_id,
                 guests,
-                discount,
-                discounted_amount,
-                regular_amount,
-                formula_amount,
+                total_discount,
+                total_discounted_with_guests,
+                total_regular_with_guests,
+                total_formula_with_guests,
                 graduate_type,
                 payment_method="to_maria",
             )
@@ -1121,9 +1211,9 @@ async def process_payment(
                 username,
                 city,
                 event_id,
-                discounted_amount,
-                regular_amount,
-                formula_amount,
+                total_discounted_with_guests,
+                total_regular_with_guests,
+                total_formula_with_guests,
                 graduate_type,
                 event=event,
             )
@@ -1135,8 +1225,8 @@ async def process_payment(
                 username,
                 city,
                 event_id,
-                discounted_amount,
-                regular_amount,
+                total_discounted_with_guests,
+                total_regular_with_guests,
                 graduate_type,
                 state=state,
                 graduation_year=graduation_year,
@@ -1152,10 +1242,10 @@ async def process_payment(
         city,
         event_id,
         guests,
-        discount,
-        discounted_amount,
-        regular_amount,
-        formula_amount,
+        total_discount,
+        total_discounted_with_guests,
+        total_regular_with_guests,
+        total_formula_with_guests,
         graduate_type,
     )
 
@@ -1500,6 +1590,31 @@ async def confirm_payment_callback(callback_query: CallbackQuery, state: FSMCont
         return
 
     event_id_for_update = registration.get("event_id", event_id)
+    if bridge_requested(app.settings):
+        event = await app.get_event_for_registration(registration)
+        assert callback_query.message is not None
+        try:
+            await confirm_registration_payment(
+                app,
+                registration,
+                event,
+                paid_amount=payment_amount,
+                evidence_reference=confirmation_reference(
+                    registration,
+                    channel="receipt-review",
+                    chat_id=callback_query.message.chat.id,
+                    message_id=callback_query.message.message_id,
+                ),
+            )
+        except WebsiteBridgeError as exc:
+            await send_safe(
+                chat_id,
+                "⚠️ Оплата пока не подтверждена: 146.school не принял синхронизацию "
+                f"(код: {exc.code}). Данные для безопасного повтора сохранены; "
+                "попросите участника открыть /status или подтвердите позже через управление.",
+            )
+            await callback_query.answer("Синхронизация не завершена")
+            return
     await app.update_payment_status(
         user_id,
         event_id=event_id_for_update,
@@ -1540,6 +1655,7 @@ async def confirm_payment_callback(callback_query: CallbackQuery, state: FSMCont
     await send_safe(user_id, payment_message)
 
     event = await app.get_event_for_registration(updated_registration)
+    await send_website_ticket_links(user_id, app, updated_registration)
     await send_paid_ticket_card(user_id, updated_registration, event)
 
     if callback_query.message:

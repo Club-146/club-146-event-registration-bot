@@ -1,21 +1,56 @@
 # Paid entry ticket contract
 
-Current TEST-first gate:
+Current payment/ticket safety gate:
 
 - The bot sends/resends a personalized card only when the matching Mongo
   registration has the exact value `payment_status == "confirmed"`.
 - `pending`, `declined`, missing status, and legacy unpaid strings never receive
   a card.
-- `/status` is the recovery path. The existing admin receipt-confirmation path
-  sends the card immediately and `/status` can resend it later.
+- The background website sync is the automatic path. `/status` remains the
+  user-triggered recovery path, and the existing admin receipt-confirmation
+  path remains the manual fallback.
 - The fallback `146-XXXX-XXXX-XXXX` code is derived deterministically from the
   bot registration ID, bot event ID, and Telegram user ID. It is a visual
   registration reference, not cryptographic proof. Door staff must pair it
   with the person's name and the bot's confirmed-registration list.
 
-The website payment bridge can be added without changing the renderer. After a
-signed CloudPayments webhook becomes authoritative, its bot-facing status API
-must return these fields:
+## August 1 website bridge
+
+The additive website bridge is implemented but disabled by default. It uses a
+dedicated bearer token and an exact configured tuple of bot event ID, website
+event ID, and website event UID. It never matches a person or event by name,
+username, email, title, date, or city.
+
+For a new registration, the bot persists the complete formula inputs,
+calculation date, pricing version, attendee type, free-type allowlist, and one
+fixed price/name per guest before creating the website intent. `/pay` and
+`/status` replay that exact payload. A legacy registration without the snapshot
+fails closed in this normal path; it must use the website's separately gated,
+audited legacy import.
+
+When enabled, the payment message contains one fixed
+`Оплатить N ₽` button to the opaque event-payment page. The bank-transfer and
+receipt-review flow remains as fallback, but the event is never routed through
+the website's generic Donation ledger. A startup-managed background loop polls
+the authenticated website API every
+`EVENT_PAYMENTS_SYNC_INTERVAL_SECONDS` seconds (15 by default). It may promote
+the local payment state only when the exact registration-bound response says
+`paid` or `waived`; `pending` never unlocks a ticket. On promotion it sends the
+participant's website ticket links automatically and then the current visual
+PNG card as fallback. The notification marker makes retries idempotent.
+
+Both manual confirmation paths use a durable Telegram-derived evidence key and
+call the website confirmation endpoint idempotently. Cancellation calls the
+website revocation endpoint before moving the Mongo record to deleted users. A
+revocation error records retry state, alerts the events/admin chat, and blocks
+the local deletion.
+
+The website's signed CloudPayments webhook is authoritative for provider
+payments. The bot does not accept browser-return parameters or provider calls
+directly; it consumes the website's authenticated, registration-bound status.
+It continues polling paid rows so a later refund/reversal revokes the local
+entitlement and notifies the participant once. The status response retains the
+following binding fields:
 
 ```json
 {

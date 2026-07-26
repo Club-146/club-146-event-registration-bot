@@ -1,4 +1,5 @@
 """Unit tests for payment timeline (shared D-3 early-bird+badge, optional food)."""
+
 from datetime import date, datetime
 
 from src.payment_timeline import (

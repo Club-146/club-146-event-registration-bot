@@ -15,6 +15,12 @@ from src.app import App, RegisteredUser, GraduateType, PAYMENT_STATUS_MAP
 from src.event_images import send_event_image
 from src.routers.admin import admin_handler
 from src.ticket_cards import is_ticket_unlocked, send_paid_ticket_card
+from src.website_event_bridge import (
+    WebsiteBridgeError,
+    freeze_new_registration_snapshot,
+    send_website_ticket_links,
+    sync_registration_from_website,
+)
 from botspot import commands_menu
 from src.user_interactions import ask_user, ask_user_choice
 from botspot.utils import send_safe, is_admin
@@ -91,6 +97,26 @@ def _format_guest_summary(guests: List[Dict]) -> str:
 async def _append_log(user_id: int, log_msg) -> None:
     if log_msg:
         log_messages[user_id].append(log_msg)
+
+
+async def _delete_registration_safely(
+    message: Message,
+    app: App,
+    user_id: int,
+    event_id: str | None = None,
+) -> bool:
+    """Block local deletion when the website could retain a valid ticket."""
+    try:
+        await app.delete_user_registration(user_id, event_id)
+    except WebsiteBridgeError:
+        await send_safe(
+            message.chat.id,
+            "Не удалось безопасно отозвать билет на сайте, поэтому регистрация сохранена. "
+            "Администратор уже получил сообщение об ошибке; попробуйте отмену позже.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return False
+    return True
 
 
 # ---- handle_registered_user helpers ----
@@ -359,6 +385,14 @@ async def _edit_guests(
 
     max_guests = event.get("max_guests_per_person", 3)
     existing_guests = reg.get("guests", [])
+    if reg.get("website_event_bridge", {}).get("intent_payload"):
+        await send_safe(
+            message.chat.id,
+            "После создания фиксированного checkout список участников нельзя менять. "
+            "Отмените регистрацию и зарегистрируйтесь заново, чтобы выпустить корректные "
+            "отдельные билеты для каждого человека.",
+        )
+        return
 
     guest_choices = {"0": "Убрать всех гостей" if existing_guests else "Нет гостей"}
     for i in range(1, max_guests + 1):
@@ -534,7 +568,8 @@ async def _handle_cancel_all_registrations(
             message.from_user.username,
         )
     if confirm == "yes":
-        await app.delete_user_registration(message.from_user.id)
+        if not await _delete_registration_safely(message, app, message.from_user.id):
+            return
         user_reg = await app.get_user_registration(message.from_user.id)
         full_name = user_reg.get("full_name", "Unknown") if user_reg else "Unknown"
         await app.log_registration_canceled(
@@ -615,7 +650,10 @@ async def _handle_single_reg_management(
         return
 
     if action == "cancel":
-        await app.delete_user_registration(message.from_user.id, selected_event_id)
+        if not await _delete_registration_safely(
+            message, app, message.from_user.id, selected_event_id
+        ):
+            return
         await app.log_registration_canceled(
             message.from_user.id,
             message.from_user.username or "",
@@ -1313,6 +1351,44 @@ async def _save_and_log_registration(
     if guests:
         await app.save_registration_guests(user_id, event_id_for_db, guests)
 
+    # Only this new-registration path may create the immutable website pricing
+    # snapshot. /pay and /status never reconstruct legacy rows from mutable
+    # event configuration.
+    registration = await app.collection.find_one(
+        {"user_id": user_id, "event_id": event_id_for_db}
+    )
+    if registration and selected_event:
+        try:
+            await freeze_new_registration_snapshot(app, registration, selected_event)
+        except WebsiteBridgeError as exc:
+            logger.warning("Could not freeze website payment snapshot: {}", exc.code)
+            await app.collection.update_one(
+                {"_id": registration["_id"], "event_id": event_id_for_db},
+                {
+                    "$set": {
+                        "website_event_bridge.sync_state": (
+                            "snapshot_re_registration_required"
+                        ),
+                        "website_event_bridge.last_error_code": exc.code,
+                    }
+                },
+            )
+            await app.log_to_chat(
+                "⚠️ Не удалось подготовить checkout 146.school для новой регистрации "
+                f"(код: {exc.code}). Оплата и выпуск билета заблокированы; после "
+                "исправления участнику потребуется зарегистрироваться заново.",
+                "events",
+            )
+            await send_safe(
+                message.chat.id,
+                "Регистрация сохранена, но безопасно зафиксировать сумму обязательного "
+                "взноса не удалось. Пока не оплачивайте: билет не будет выпущен. "
+                "Администратор уже получил сообщение; после исправления нужно будет "
+                "отменить эту регистрацию и зарегистрироваться заново.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
+
     city_prep = _get_city_prepositional(selected_event, location, reg_city_name)
     date_display = get_event_date_display(selected_event) if selected_event else ""
     event_is_free = (
@@ -1542,7 +1618,8 @@ async def _cancel_single_registration(
         timeout=None,
     )
     if response == "yes":
-        await app.delete_user_registration(user_id, reg_event_id)
+        if not await _delete_registration_safely(message, app, user_id, reg_event_id):
+            return
         await app.log_registration_canceled(
             user_id, message.from_user.username or "", full_name, city
         )
@@ -1611,7 +1688,8 @@ async def _apply_cancel_choice(
 
     if response == "all":
         full_name = registrations[0].get("full_name", "Unknown")
-        await app.delete_user_registration(user_id)
+        if not await _delete_registration_safely(message, app, user_id):
+            return
         await app.log_registration_canceled(
             user_id, message.from_user.username or "", full_name, None
         )
@@ -1625,7 +1703,8 @@ async def _apply_cancel_choice(
     reg = next(r for r in registrations if r["event_id"] == response)
     full_name = reg["full_name"]
     city = reg["target_city"]
-    await app.delete_user_registration(user_id, response)
+    if not await _delete_registration_safely(message, app, user_id, response):
+        return
     await app.log_registration_canceled(
         user_id, message.from_user.username or "", full_name, city
     )
@@ -1763,6 +1842,15 @@ def _format_payment_status_line(reg: Dict, event, graduate_type: str) -> str:
 
 
 def _format_ticket_status_line(reg: Dict) -> str:
+    bridge = reg.get("website_event_bridge", {})
+    remote_status = bridge.get("remote_status") if isinstance(bridge, dict) else None
+    if remote_status in ("cancelled", "refunded"):
+        return "🎟 Билет отозван и недействителен для входа.\n"
+    if bridge and remote_status not in ("paid", "waived"):
+        return (
+            "🎟 Заявка сохранена; действующего билета пока нет. "
+            "Именной билет появится после подтверждения обязательного взноса.\n"
+        )
     if is_ticket_unlocked(reg):
         return "🎟 Именной билет действителен для входа и доступен ниже.\n"
     return (
@@ -1824,6 +1912,13 @@ async def status_handler(message: Message, state: FSMContext, app: App):
         return
 
     events_by_reg = [await app.get_event_for_registration(reg) for reg in registrations]
+    for registration, event in zip(registrations, events_by_reg):
+        try:
+            await sync_registration_from_website(app, registration, event)
+        except WebsiteBridgeError as exc:
+            logger.warning(
+                "Could not synchronize website ticket on /status: {}", exc.code
+            )
     status_text = _format_registration_status_text(registrations, events_by_reg, app)
 
     enabled_events = await app.get_enabled_events()
@@ -1843,7 +1938,13 @@ async def status_handler(message: Message, state: FSMContext, app: App):
     await send_safe(message.chat.id, status_text, reply_markup=ReplyKeyboardRemove())
 
     for registration, event in zip(registrations, events_by_reg):
-        if is_ticket_unlocked(registration):
+        await send_website_ticket_links(message.chat.id, app, registration)
+        bridge = registration.get("website_event_bridge", {})
+        remote_status = (
+            bridge.get("remote_status") if isinstance(bridge, dict) else None
+        )
+        remote_allows_entry = remote_status in ("paid", "waived")
+        if is_ticket_unlocked(registration) and (not bridge or remote_allows_entry):
             await send_paid_ticket_card(message.chat.id, registration, event)
 
 
