@@ -102,8 +102,7 @@ def _format_event_summary(event: dict, reg_count: int = 0) -> str:
 
     food_on = ask_bring_food_enabled(event)
     lines.append(
-        "🥗 Просить принести еду при поздней оплате: "
-        + ("да" if food_on else "нет")
+        "🥗 Просить принести еду при поздней оплате: " + ("да" if food_on else "нет")
     )
 
     # Guest settings
