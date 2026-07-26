@@ -55,6 +55,13 @@ def main(debug=False) -> None:
         except Exception:
             logger.exception("Failed to start payment reminder scheduler")
 
+        try:
+            from src.heartbeat import start_heartbeat
+
+            start_heartbeat(bot)
+        except Exception:
+            logger.exception("Failed to start heartbeat scheduler")
+
     dp.startup.register(on_startup)
     # Cancels the website event-payment sync loop so shutdown is not delayed.
     dp.shutdown.register(app.shutdown)
