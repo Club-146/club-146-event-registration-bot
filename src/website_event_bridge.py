@@ -734,15 +734,17 @@ async def sync_pending_event_payments_once(
         raise WebsiteBridgeError("bridge_configuration_incomplete")
 
     event_id = _clean(app.settings.event_payments_bot_event_id)
-    cursor = app.collection.find({
-        "event_id": event_id,
-        "website_event_bridge.intent_payload": {"$exists": True},
-        # Keep paid rows in the small polling set so a later provider refund
-        # or reversal can still revoke local ticket presentation.
-        "website_event_bridge.remote_status": {
-            "$nin": sorted(REMOTE_FINAL_REVOKED_STATUSES)
-        },
-    })
+    cursor = app.collection.find(
+        {
+            "event_id": event_id,
+            "website_event_bridge.intent_payload": {"$exists": True},
+            # Keep paid rows in the small polling set so a later provider refund
+            # or reversal can still revoke local ticket presentation.
+            "website_event_bridge.remote_status": {
+                "$nin": sorted(REMOTE_FINAL_REVOKED_STATUSES)
+            },
+        }
+    )
     registrations = await cursor.to_list(length=None)
     notified = 0
     shared_client = client or WebsiteEventBridgeClient(app.settings)
@@ -750,15 +752,14 @@ async def sync_pending_event_payments_once(
         try:
             event = await app.get_event_for_registration(registration)
             response = await sync_registration_from_website(
-                app, registration, event, client=shared_client)
+                app, registration, event, client=shared_client
+            )
             if response:
                 if await _notify_automatic_confirmation(
                     app, registration, event, response
                 ):
                     notified += 1
-                elif await _notify_automatic_revocation(
-                    app, registration, response
-                ):
+                elif await _notify_automatic_revocation(app, registration, response):
                     notified += 1
         except WebsiteBridgeError as exc:
             logger.warning(

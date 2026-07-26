@@ -203,7 +203,8 @@ class App:
 
         if bridge_requested(self.settings) and self._event_payment_sync_task is None:
             self._event_payment_sync_task = asyncio.create_task(
-                run_payment_sync_loop(self), name="event-payment-sync")
+                run_payment_sync_loop(self), name="event-payment-sync"
+            )
 
     async def shutdown(self):
         """Stop background bridge work without delaying bot shutdown."""

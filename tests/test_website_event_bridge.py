@@ -552,9 +552,7 @@ async def test_background_sync_pushes_provider_revocation_once():
     for admission in client.create_response["admissions"]:
         admission["admission_valid"] = False
 
-    with patch(
-        "src.website_event_bridge.send_safe", new_callable=AsyncMock
-    ) as send:
+    with patch("src.website_event_bridge.send_safe", new_callable=AsyncMock) as send:
         first = await sync_pending_event_payments_once(app, client=client)
         second = await sync_pending_event_payments_once(app, client=client)
 
