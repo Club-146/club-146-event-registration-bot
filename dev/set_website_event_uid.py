@@ -44,14 +44,20 @@ from pymongo import MongoClient
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bot-event-id", required=True,
-                        help="ObjectId of the event document in Mongo")
-    parser.add_argument("--website-event-uid",
-                        help="stable website Event.uid, e.g. event-1@146.school")
-    parser.add_argument("--unset", action="store_true",
-                        help="clear the link instead of setting it")
-    parser.add_argument("--apply", action="store_true",
-                        help="actually write; without it the script only reports")
+    parser.add_argument(
+        "--bot-event-id", required=True, help="ObjectId of the event document in Mongo"
+    )
+    parser.add_argument(
+        "--website-event-uid", help="stable website Event.uid, e.g. event-1@146.school"
+    )
+    parser.add_argument(
+        "--unset", action="store_true", help="clear the link instead of setting it"
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="actually write; without it the script only reports",
+    )
     args = parser.parse_args(argv)
     if args.unset == bool(args.website_event_uid):
         parser.error("give exactly one of --website-event-uid or --unset")
@@ -65,8 +71,9 @@ def main(argv=None) -> int:
     conn = os.environ.get("BOTSPOT_MONGO_DATABASE_CONN_STR")
     database = os.environ.get("BOTSPOT_MONGO_DATABASE_DATABASE")
     if not conn or not database:
-        print("BOTSPOT_MONGO_DATABASE_CONN_STR / _DATABASE are not set",
-              file=sys.stderr)
+        print(
+            "BOTSPOT_MONGO_DATABASE_CONN_STR / _DATABASE are not set", file=sys.stderr
+        )
         return 2
 
     try:
@@ -90,20 +97,24 @@ def main(argv=None) -> int:
     # event, which would let two registration funnels mint admissions for it.
     if target is not None:
         clash = events.find_one(
-            {"website_event_uid": target, "_id": {"$ne": object_id}})
+            {"website_event_uid": target, "_id": {"$ne": object_id}}
+        )
         if clash:
-            print(f"refusing: {target!r} is already bound to event "
-                  f"{clash['_id']} ({clash.get('name')!r})", file=sys.stderr)
+            print(
+                f"refusing: {target!r} is already bound to event "
+                f"{clash['_id']} ({clash.get('name')!r})",
+                file=sys.stderr,
+            )
             return 1
 
     if not args.apply:
         print("\ndry run — nothing written. Re-run with --apply.")
         return 0
 
-    result = events.update_one({"_id": object_id},
-                               {"$set": {"website_event_uid": target}})
-    print(f"\nwritten: matched={result.matched_count} "
-          f"modified={result.modified_count}")
+    result = events.update_one(
+        {"_id": object_id}, {"$set": {"website_event_uid": target}}
+    )
+    print(f"\nwritten: matched={result.matched_count} modified={result.modified_count}")
     return 0
 
 

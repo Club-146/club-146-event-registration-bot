@@ -23,7 +23,8 @@ REPO = Path(__file__).resolve().parents[1]
 
 def _load_ops_script():
     spec = importlib.util.spec_from_file_location(
-        "set_website_event_uid", REPO / "dev" / "set_website_event_uid.py")
+        "set_website_event_uid", REPO / "dev" / "set_website_event_uid.py"
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -44,7 +45,8 @@ class TestAddWebsiteEventUid:
     def _app(self, modified=3, matched=3):
         app = MagicMock()
         app.events_col.update_many = AsyncMock(
-            return_value=MagicMock(modified_count=modified, matched_count=matched))
+            return_value=MagicMock(modified_count=modified, matched_count=matched)
+        )
         return app
 
     @pytest.mark.asyncio
@@ -87,13 +89,24 @@ class TestOpsScriptArguments:
             self.module.parse_args(["--bot-event-id", "abc"])
         with pytest.raises(SystemExit):
             self.module.parse_args(
-                ["--bot-event-id", "abc", "--unset",
-                 "--website-event-uid", "event-1@146.school"])
+                [
+                    "--bot-event-id",
+                    "abc",
+                    "--unset",
+                    "--website-event-uid",
+                    "event-1@146.school",
+                ]
+            )
 
     def test_accepts_a_set_invocation(self):
         args = self.module.parse_args(
-            ["--bot-event-id", "6a599a17a37724d81b7eadc3",
-             "--website-event-uid", "event-1@146.school"])
+            [
+                "--bot-event-id",
+                "6a599a17a37724d81b7eadc3",
+                "--website-event-uid",
+                "event-1@146.school",
+            ]
+        )
         assert args.website_event_uid == "event-1@146.school"
         assert args.unset is False
 
@@ -101,6 +114,11 @@ class TestOpsScriptArguments:
         """Dry run is the default: an ops script that touches prod on a typo
         is worse than one that needs a second invocation."""
         args = self.module.parse_args(
-            ["--bot-event-id", "6a599a17a37724d81b7eadc3",
-             "--website-event-uid", "event-1@146.school"])
+            [
+                "--bot-event-id",
+                "6a599a17a37724d81b7eadc3",
+                "--website-event-uid",
+                "event-1@146.school",
+            ]
+        )
         assert args.apply is False
