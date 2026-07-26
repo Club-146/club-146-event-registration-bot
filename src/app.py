@@ -4,7 +4,7 @@ from aiogram.types import Message
 from datetime import datetime
 from enum import Enum
 from loguru import logger
-from pydantic import SecretStr, BaseModel
+from pydantic import SecretStr, BaseModel, Field
 from pydantic_settings import BaseSettings
 from typing import Any, Optional, Tuple, List, Dict
 
@@ -84,6 +84,17 @@ class AppSettings(BaseSettings):
     # Sonnet preferred — Haiku misclassified receipts in practice.
     payment_parse_model: str = "anthropic/claude-sonnet-4-6"
 
+    # August 1 website checkout/ticket bridge. This is deliberately disabled
+    # unless every value is configured in the bot environment.
+    event_payments_bridge_enabled: bool = False
+    event_payments_website_api_base_url: str = ""
+    event_payments_website_api_token: SecretStr = SecretStr("")
+    event_payments_website_event_id: Optional[int] = None
+    event_payments_website_event_uid: str = ""
+    event_payments_bot_event_id: str = ""
+    event_payments_api_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    event_payments_sync_interval_seconds: float = Field(default=15.0, ge=5, le=300)
+
     delay_messages: bool = True
 
     class Config:
@@ -158,6 +169,7 @@ class App:
         self._user_sources = None
         self._export_debounce_task: asyncio.Task | None = None
         self._export_debounce_seconds = 30
+        self._event_payment_sync_task: asyncio.Task | None = None
 
     async def startup(self):
         """Run startup tasks like fixing the database and initializing collections."""
@@ -186,6 +198,24 @@ class App:
             )
             logger.info(f"- Free events: {fix_results['free_events_fixed']}")
             logger.info(f"- Free types: {fix_results['free_types_fixed']}")
+
+        from src.website_event_bridge import bridge_requested, run_payment_sync_loop
+
+        if bridge_requested(self.settings) and self._event_payment_sync_task is None:
+            self._event_payment_sync_task = asyncio.create_task(
+                run_payment_sync_loop(self), name="event-payment-sync"
+            )
+
+    async def shutdown(self):
+        """Stop background bridge work without delaying bot shutdown."""
+        task = self._event_payment_sync_task
+        self._event_payment_sync_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     @property
     def collection(self):
@@ -798,6 +828,8 @@ class App:
         event_id: Optional[str] = None,
         username: Optional[str] = None,
         full_name: Optional[str] = None,
+        website_transition_kind: str = "registration_cancelled",
+        website_reason: str = "Участник отменил регистрацию",
     ):
         """
         Move a user's registration to deleted_users collection instead of permanent deletion
@@ -808,6 +840,29 @@ class App:
             username: Optional user's Telegram username for logging
             full_name: Optional user's full name for logging
         """
+        # Revoke any website-issued admission before moving the local record.
+        # A failed revocation must leave the registration active so an opaque
+        # website ticket can never remain valid after a local-only deletion.
+        from src.website_event_bridge import bridge_requested
+
+        if bridge_requested(self.settings):
+            query: Dict = {"user_id": user_id}
+            if event_id:
+                query["event_id"] = event_id
+            registrations = await self.collection.find(query).to_list(length=None)
+            if registrations:
+                from src.website_event_bridge import revoke_before_local_deletion
+
+                for registration in registrations:
+                    event = await self.get_event_for_registration(registration)
+                    await revoke_before_local_deletion(
+                        self,
+                        registration,
+                        event,
+                        transition_kind=website_transition_kind,
+                        reason=website_reason,
+                    )
+
         # Log the deletion event
         log_data = {"action": "delete_registration"}
         if event_id:

@@ -56,6 +56,8 @@ def main(debug=False) -> None:
             logger.exception("Failed to start payment reminder scheduler")
 
     dp.startup.register(on_startup)
+    # Cancels the website event-payment sync loop so shutdown is not delayed.
+    dp.shutdown.register(app.shutdown)
 
     # Setup dispatcher with our components
     bm.setup_dispatcher(dp)

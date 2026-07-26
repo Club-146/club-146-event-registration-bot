@@ -13,6 +13,13 @@ from loguru import logger
 from pydantic import BaseModel
 from src.app import App
 from src.ticket_cards import send_paid_ticket_card
+from src.website_event_bridge import (
+    WebsiteBridgeError,
+    bridge_requested,
+    confirmation_reference,
+    confirm_registration_payment,
+    send_website_ticket_links,
+)
 from botspot import commands_menu
 from botspot.components.qol.bot_commands_menu import Visibility
 from src.user_interactions import ask_user_choice, ask_user_raw
@@ -288,7 +295,9 @@ async def _send_admin_confirmed_ticket(
                 f"user={target_user_id}, event={event_id}"
             )
             return
+        registration = dict(registration)
         event = await app.get_event_for_registration(registration)
+        await send_website_ticket_links(target_user_id, app, registration)
         await send_paid_ticket_card(target_user_id, registration, event)
     except Exception as e:
         logger.warning(
@@ -312,6 +321,32 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
     amount = await _confirm_payment_amount(chat_id, state, target_name)
     if amount is None:
         return
+
+    # Reconcile the website intent BEFORE marking the local row confirmed: if
+    # the site refuses, nothing here has changed yet and the retry is clean.
+    if bridge_requested(app.settings):
+        event = await app.get_event_for_registration(reg)
+        try:
+            await confirm_registration_payment(
+                app,
+                reg,
+                event,
+                paid_amount=amount,
+                evidence_reference=confirmation_reference(
+                    reg,
+                    channel="admin-register-payment",
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                ),
+            )
+        except WebsiteBridgeError as exc:
+            await send_safe(
+                chat_id,
+                "⚠️ Оплата пока не подтверждена: 146.school не принял синхронизацию "
+                f"(код: {exc.code}). Данные для безопасного повтора сохранены; "
+                "попросите участника открыть /status или повторите позже.",
+            )
+            return
 
     await _apply_admin_confirmed_payment(
         app,
