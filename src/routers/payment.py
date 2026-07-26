@@ -13,7 +13,6 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from datetime import datetime
 from loguru import logger
 from src import templates
 from src.app import App, GraduateType
@@ -222,10 +221,10 @@ def _build_early_bird_payment_block(
     # Collapsed quote: formula + year price + discount (secondary detail).
     quote_parts: list[str] = ["расчет оплаты"]
     if include_formula:
-        quote_parts.append(f"{escape(str(city), quote=True)} → {escape(str(formula), quote=True)}")
-    quote_parts.append(
-        f"{escape(price_label, quote=True)}: {regular_amount} руб."
-    )
+        quote_parts.append(
+            f"{escape(str(city), quote=True)} → {escape(str(formula), quote=True)}"
+        )
+    quote_parts.append(f"{escape(price_label, quote=True)}: {regular_amount} руб.")
     quote_parts.append(f"При ранней регистрации скидка {discount} руб!")
     quote_body = "\n".join(quote_parts)
     # expandable = collapsed by default in Telegram clients that support it
@@ -629,9 +628,7 @@ def _build_user_info_text(
     user_info = f"👤 Пользователь: {username or ''} (ID: {user_id})\n"
     user_info += f"📍 Город: {city}\n"
     if payment_method:
-        user_info += (
-            f"📍 Куда: {_payment_method_label(payment_method, source=payment_method_source)}\n"
-        )
+        user_info += f"📍 Куда: {_payment_method_label(payment_method, source=payment_method_source)}\n"
         if method_reason:
             user_info += f"💬 {escape(method_reason)}\n"
     if guests:
