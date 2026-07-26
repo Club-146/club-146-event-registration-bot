@@ -120,9 +120,7 @@ def early_bird_deadline_at(event: dict) -> Optional[datetime]:
         return None
     stored = _as_date(event.get("early_bird_deadline"))
     if stored is not None:
-        return datetime.combine(
-            stored, time(hour=DEADLINE_HOUR, minute=0, second=0)
-        )
+        return datetime.combine(stored, time(hour=DEADLINE_HOUR, minute=0, second=0))
     # Align with badge by default (EARLY_BIRD_DAYS_BEFORE == BADGE_DAYS_BEFORE).
     return deadline_at(event, EARLY_BIRD_DAYS_BEFORE)
 
@@ -244,9 +242,7 @@ def pay_later_message(event: dict, now: Optional[datetime] = None) -> str:
             f"• до <b>{t.badge_deadline_display}</b> — успеваем подготовить "
             f"<b>именной бейдж</b>;"
         )
-        lines.append(
-            "• позже — бейдж уже не печатаем (вас всё равно ждут)."
-        )
+        lines.append("• позже — бейдж уже не печатаем (вас всё равно ждут).")
 
     lines.append(
         "\nПосле оплаты пришлите скриншот в этот чат (или нажмите «Оплатил» в /pay)."

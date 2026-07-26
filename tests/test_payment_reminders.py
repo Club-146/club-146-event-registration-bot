@@ -1,4 +1,5 @@
 """Tests for payment reminder selection (no real bot sends)."""
+
 from datetime import date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -116,9 +117,7 @@ async def test_send_payment_reminders_respects_pause():
         "src.payment_reminders.get_control",
         new=AsyncMock(return_value={"paused": True}),
     ):
-        stats = await send_payment_reminders(
-            app, bot, now=datetime(2026, 7, 27, 9, 0)
-        )
+        stats = await send_payment_reminders(app, bot, now=datetime(2026, 7, 27, 9, 0))
     assert stats["paused"] == 1
     bot.send_message.assert_not_awaited()
 
@@ -164,17 +163,17 @@ async def test_force_send_now_ignores_calendar_and_pause():
 def test_admin_preview_kinds_day_before_reminder():
     # No early bird: food d4 send Jul 27 (cutoff Jul 28); badge d2 send Jul 28
     event = {"date": date(2026, 8, 1), "city": "Пермь"}
-    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 26, 10)) == [
-        "d4"
-    ]
-    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 27, 10)) == [
-        "d2"
-    ]
+    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 26, 10)) == ["d4"]
+    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 27, 10)) == ["d2"]
     assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 28, 10)) == []
 
 
 def test_format_admin_preview_includes_text_and_recipients():
-    event = {"_id": "aabbccddeeff001122334455", "city": "Пермь", "date": date(2026, 8, 1)}
+    event = {
+        "_id": "aabbccddeeff001122334455",
+        "city": "Пермь",
+        "date": date(2026, 8, 1),
+    }
     targets = [{"full_name": "Иван", "username": "ivan"}]
     text = "Hello body"
     msg = format_admin_preview(
