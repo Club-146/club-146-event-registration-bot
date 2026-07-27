@@ -200,6 +200,34 @@ confirm JSON shape under production code (see contradiction note below).
 3. **Guest wire payload.** Guests still go over the wire as name + fixed amount
    only. Graduation year/letter are stored on the bot registration for pricing
    and display; expanding website `GuestTerms` is a follow-up.
+
+   **Guest pricing rule — DECIDED 27 Jul 2026 (Petr).** A guest who gives a
+   school year is priced *exactly like a registrant of that year*; a guest with
+   no school year (a «друг») pays the flat guest rate. This side is canonical
+   (`App.calculate_guest_price`) and the website was changed to match.
+
+   It closes a real loophole: the website used to charge every guest a flat
+   `guest_price_fixed`, so a 1995 alum cost 1500 as somebody's guest versus
+   7600 as themselves — a 6100₽ discount for using the guest field.
+
+   **This side needs no code change, but it does need config:**
+   `guest_price_minimum` must be set to the intended flat rate (1500). That one
+   field is both the floor for alum guests and the price for a «друг»; left at
+   0, a «друг» falls through to "the formula for someone who left 15 years ago"
+   (4400 for the Aug 1 config).
+
+   Two details that are easy to get subtly wrong, and are pinned by tests:
+   - free attendee types return 0 **before** the minimum applies, so a teacher
+     brought as a guest is not floored up to 1500.
+   - the minimum floors the *regular* amount and the early-bird discount comes
+     off afterwards, so the final amount can sit below the minimum
+     (1500 - 500 = 1000).
+
+   The agreed numbers live in a table duplicated in both repos:
+   `tests/test_guest_pricing_parity.py` here and
+   `newsite/tests/test_guest_pricing_parity.py` on the website. Change guest
+   pricing in one repo and the other repo's suite fails — deliberately, since
+   the two services share no package.
 4. **Pricing config endpoint — RESOLVED 2026-07-27.** It exists:
    `GET /api/internal/event-configs/by-bot-event/{bot_event_id}` (also
    `by-uid/{website_event_uid}`, a bare list, and a `PUT` for upserts). It
