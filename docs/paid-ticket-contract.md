@@ -115,3 +115,70 @@ IDs (`bot_registration_id`, `telegram_user_id`, `bot_event_id`),
 `website_event_uid`, immutable `amount_minor`/`currency`, attendee name, and an
 email only if CloudPayments requires it. Event, amount, purpose, and payment
 frequency must not be editable through public URL parameters.
+
+## Local mock + what is tested
+
+Bot-side mock of the website internal API lives at
+`dev/mock_website_event_payments/` (stdlib HTTP server, no FastAPI).
+
+```bash
+make mock-website-api
+# or: uv run python -m dev.mock_website_event_payments.server --port 8765
+```
+
+Point a throwaway **local** process only:
+
+```bash
+EVENT_PAYMENTS_BRIDGE_ENABLED=true
+EVENT_PAYMENTS_WEBSITE_API_BASE_URL=http://127.0.0.1:8765
+EVENT_PAYMENTS_WEBSITE_API_TOKEN=test-dedicated-token
+EVENT_PAYMENTS_WEBSITE_EVENT_ID=1
+EVENT_PAYMENTS_WEBSITE_EVENT_UID=aug1-2026-perm
+EVENT_PAYMENTS_BOT_EVENT_ID=<mapped mongo events._id>
+```
+
+Loopback plain HTTP (`127.0.0.1` / `localhost` / `::1`) is accepted so the mock
+can run without TLS. Non-loopback base URLs still require HTTPS. Do not enable
+the bridge in committed env, docker-compose, Dockerfile, or Coolify while the
+infra session is rewiring the dev bot.
+
+Covered by automated tests:
+
+- Unit bridge behaviour (`tests/test_website_event_bridge.py`) with an in-process
+  FakeClient.
+- Mock domain service (`tests/test_mock_website_event_payments.py`): formula,
+  idempotent create/replay, 409 conflict, confirm, revoke, zero-price guest
+  rejection.
+- HTTP e2e (`tests/test_website_event_bridge_e2e.py`): real
+  `WebsiteEventBridgeClient` against the mock server — freeze snapshot → create
+  → replay → confirm → revoke; provider-paid background sync; manual-admin
+  registration shape (`user_id=None`) with a priced guest; loopback HTTP URL
+  rule.
+- Guest year/letter pricing (`App.calculate_guest_price(event, year, type)`);
+  admin manual registration flow.
+
+Still untestable without the live/staging website: CloudPayments webhook,
+HMAC group-page HTML, real PostgreSQL uniqueness races, and the website's
+confirm JSON shape under production code (see contradiction note below).
+
+### Contract notes found during mock work
+
+1. **Confirm response `fixed_amount`.** The bot's `_normalise_response` requires
+   `fixed_amount` on create *and* confirm. Live website
+   `confirm_event_payment_intent` currently returns status/admissions/path only.
+   The mock includes `fixed_amount` so the bot path stays green; website should
+   add it (or the bot should fall back to the frozen expected amount).
+2. **`source_system` vocabulary.** Website hardcodes
+   `SOURCE_SYSTEM = "club146_registry_bot"`. Shared dictionary
+   (`telegram_bot` / `website` / `vk` / `manual_admin`) is not landed yet. Bot
+   does not send `source_system` in the create payload; admin manual
+   registrations stamp bot-side `start_source=manual_admin` only. Do not change
+   the value the website stores until both sides land the dictionary together.
+3. **Guest wire payload.** Guests still go over the wire as name + fixed amount
+   only. Graduation year/letter are stored on the bot registration for pricing
+   and display; expanding website `GuestTerms` is a follow-up.
+4. **Pricing config endpoint.** No read-only website pricing-config endpoint is
+   documented/available yet. Bot keeps Mongo event pricing as the source of
+   formula inputs for new snapshots. Existing registrations never rebuild from
+   remote config (`WebsiteSnapshotRequired`).
+5. **Payment confirmation ≠ attendance.** Mock and bot never set check-in.

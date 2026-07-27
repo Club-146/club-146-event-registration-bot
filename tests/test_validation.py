@@ -322,41 +322,70 @@ class TestCalculateEventPayment:
 
 
 class TestCalculateGuestPrice:
-    def test_basic(self, app):
-        event = {"guest_price_minimum": 1000}
-        assert app.calculate_guest_price(event, 2000) == (2000, 2000)
+    """Guests are priced from their own graduation year, floored at guest_price_minimum."""
 
-    def test_minimum_applied(self, app):
-        event = {"guest_price_minimum": 3000}
-        assert app.calculate_guest_price(event, 2000) == (3000, 3000)
+    def _formula_event(self, **overrides):
+        event = {
+            "pricing_type": "formula",
+            "price_formula_base": 1000,
+            "price_formula_rate": 100,
+            "price_formula_reference_year": 2026,
+            "price_formula_step": 1,
+            "guest_price_minimum": 0,
+            "free_for_types": [],
+        }
+        event.update(overrides)
+        return event
+
+    def test_younger_guest_cheaper_than_older(self, app):
+        event = self._formula_event()
+        # 2020 grad: 6 years → 1000+600=1600
+        assert app.calculate_guest_price(event, 2020) == (1600, 1600)
+        # 2010 grad: 16 years → 1000+1600=2600
+        assert app.calculate_guest_price(event, 2010) == (2600, 2600)
+
+    def test_minimum_applied_for_recent_grad(self, app):
+        event = self._formula_event(guest_price_minimum=3000)
+        # formula 1600, floor 3000
+        assert app.calculate_guest_price(event, 2020) == (3000, 3000)
 
     def test_no_minimum(self, app):
-        event = {}
-        assert app.calculate_guest_price(event, 1500) == (1500, 1500)
+        event = self._formula_event()
+        assert app.calculate_guest_price(event, 2021) == (1500, 1500)
 
     def test_early_bird_applied(self, app):
-        event = {
-            "guest_price_minimum": 1000,
-            "date": datetime(2099, 6, 1),
-            "early_bird_discount": 500,
-        }
-        # max(1000, 2000) = 2000 regular, minus 500 = 1500 discounted
-        assert app.calculate_guest_price(event, 2000) == (2000, 1500)
+        event = self._formula_event(
+            guest_price_minimum=1000,
+            date=datetime(2099, 6, 1),
+            early_bird_discount=500,
+        )
+        # 2016 → 1000+1000=2000, floor 1000, minus 500 = 1500
+        assert app.calculate_guest_price(event, 2016) == (2000, 1500)
 
     def test_early_bird_expired(self, app):
-        event = {
-            "guest_price_minimum": 1000,
-            "date": datetime(2020, 1, 10),
-            "early_bird_discount": 500,
-        }
-        assert app.calculate_guest_price(event, 2000) == (2000, 2000)
+        event = self._formula_event(
+            guest_price_minimum=1000,
+            date=datetime(2020, 1, 10),
+            early_bird_discount=500,
+        )
+        assert app.calculate_guest_price(event, 2016) == (2000, 2000)
 
     def test_early_bird_floor_zero(self, app):
-        event = {
-            "date": datetime(2099, 6, 1),
-            "early_bird_discount": 9999,
-        }
-        assert app.calculate_guest_price(event, 500) == (500, 0)
+        event = self._formula_event(
+            price_formula_base=500,
+            price_formula_rate=0,
+            date=datetime(2099, 6, 1),
+            early_bird_discount=9999,
+        )
+        assert app.calculate_guest_price(event, 2020) == (500, 0)
+
+    def test_non_graduate_uses_guest_minimum(self, app):
+        event = self._formula_event(guest_price_minimum=2500)
+        assert app.calculate_guest_price(event, 2000, "NON_GRADUATE") == (2500, 2500)
+
+    def test_free_type_guest_is_zero(self, app):
+        event = self._formula_event(free_for_types=["TEACHER"])
+        assert app.calculate_guest_price(event, 2010, "TEACHER") == (0, 0)
 
 
 class TestIsEventPassed:
