@@ -168,6 +168,21 @@ def test_admin_preview_kinds_day_before_reminder():
     assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 28, 10)) == []
 
 
+def test_admin_preview_same_send_day_only_d4():
+    """Early bird + badge share cutoff → one admin preview (not d4 and d2)."""
+    event = {
+        "date": date(2026, 8, 1),
+        "city": "Пермь",
+        "early_bird_discount": 500,
+        "ask_bring_food": False,
+    }
+    # Shared cutoff Jul 29 → user send Jul 28 → admin preview Jul 27
+    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 27, 3, 15)) == [
+        "d4"
+    ]
+    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 26, 10)) == []
+
+
 def test_format_admin_preview_includes_text_and_recipients():
     event = {
         "_id": "aabbccddeeff001122334455",

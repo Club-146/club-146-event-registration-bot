@@ -71,6 +71,10 @@ def test_shared_cutoff_one_auto_reminder_day():
     assert reminder_kind_for_event(event, now=datetime(2026, 7, 28, 10, 0)) == "d4"
     assert reminder_kind_for_event(event, now=datetime(2026, 7, 29, 10, 0)) is None
     assert reminder_kind_for_event(event, now=datetime(2026, 7, 27, 10, 0)) is None
+    # Admin preview day is also one kind only
+    assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 27, 3, 15)) == [
+        "d4"
+    ]
 
 
 def test_badge_only_reminder_when_no_early_bird_and_no_food():
@@ -164,8 +168,7 @@ def test_d4_skips_early_bird_when_no_discount():
 
 def test_admin_preview_is_day_before_send():
     event = _event(date(2026, 8, 1), early_bird_discount=500, ask_bring_food=False)
-    # shared send Jul 28 → preview Jul 27; d4 preferred in kinds list first
+    # shared send Jul 28 → preview Jul 27; only d4 (same-day d2 suppressed)
     kinds = admin_preview_kinds_for_event(event, now=datetime(2026, 7, 27, 8))
-    assert "d4" in kinds
-    assert "d2" in kinds  # both scheduled same send day
+    assert kinds == ["d4"]
     assert admin_preview_kinds_for_event(event, now=datetime(2026, 7, 28, 8)) == []

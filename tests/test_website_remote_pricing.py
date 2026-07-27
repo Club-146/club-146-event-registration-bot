@@ -333,47 +333,81 @@ class TestEarlyBirdWindow:
         return regular
 
     @pytest.mark.parametrize(
-        "moment, agree",
+        "moment, discounted",
         [
             (datetime(2026, 7, 28, 10, 0), True),
             (datetime(2026, 7, 29, 5, 0), True),
-            # after the 06:00 cutoff, on the deadline day itself
+            # 06:00 on the deadline day is the cutoff, shared with food and
+            # named badges. This is the instant that used to disagree.
+            (datetime(2026, 7, 29, 6, 0), False),
             (datetime(2026, 7, 29, 10, 0), False),
-            (datetime(2026, 7, 30, 10, 0), True),
+            (datetime(2026, 7, 30, 10, 0), False),
         ],
     )
-    def test_the_one_day_window_is_real(self, moment, agree):
-        """CHARACTERISATION TEST -- it pins current behaviour, not desired
-        behaviour. The 29 Jul 10:00 case asserting `agree is False` is
-        documenting a defect. When the canonical early-bird cutoff is decided
-        (whole-day vs 06:00), change this test to expect agreement everywhere;
-        do not "fix" it by deleting the case.
+    def test_displayed_and_frozen_agree_at_every_instant(self, moment, discounted):
+        """The 06:00 cutoff is canonical (Petr, 27 Jul 2026). The frozen charge
+        must equal the displayed price at every instant, including the one-day
+        window that used to disagree: on 29 Jul after 06:00 the bot displayed
+        4600 while the intent froze 4100.
         """
         settings = _settings(remote_pricing=False)
         event, registration = _event(), _registration()
         displayed = self._displayed(event, registration, moment)
         _, frozen = build_new_intent_payload(
-            settings, registration, event, calculation_date=moment.date()
+            settings, registration, event, calculation_date=moment.date(), now=moment
         )
-        assert (displayed == frozen) is agree, (
+        assert displayed == frozen, (
             f"{moment:%d %b %H:%M}: displayed {displayed}, frozen {frozen}"
         )
+        # 1400 + 200*(2026-2010) = 4600, less the 500 early bird while active
+        assert frozen == (4100 if discounted else 4600)
+
+    def test_the_deadline_stays_in_the_snapshot_after_it_lapses(self):
+        """Zeroing the discount is what makes the website's whole-day
+        comparison moot; the deadline itself is still recorded for audit."""
+        settings = _settings(remote_pricing=False)
+        payload, _ = build_new_intent_payload(
+            settings,
+            _registration(),
+            _event(),
+            calculation_date=date(2026, 7, 29),
+            now=datetime(2026, 7, 29, 10, 0),
+        )
+        assert payload["formula"]["early_bird_deadline"] == "2026-07-29"
+        assert payload["formula"]["early_bird_discount_rubles"] == 0
+
+    def test_a_discount_with_no_explicit_deadline_uses_the_displayed_fallback(self):
+        """`early_bird_deadline_at` falls back to D-3 when only a discount is
+        configured. Reading the raw event field instead would display a discount
+        and freeze a charge without one -- the same defect, other direction."""
+        settings = _settings(remote_pricing=False)
+        event = _event()
+        del event["early_bird_deadline"]  # discount 500, D-3 of 1 Aug = 29 Jul
+        payload, frozen = build_new_intent_payload(
+            settings,
+            _registration(),
+            event,
+            calculation_date=date(2026, 7, 28),
+            now=datetime(2026, 7, 28, 10, 0),
+        )
+        assert payload["formula"]["early_bird_deadline"] == "2026-07-29"
+        assert frozen == 4100
 
     @pytest.mark.asyncio
-    async def test_the_window_is_refused_rather_than_charged(self):
-        """Whichever cutoff is eventually chosen as canonical, the bot must not
-        quietly charge one price and display another."""
+    async def test_a_disagreement_is_still_refused_rather_than_charged(self):
+        """Belt and braces: the cutoff now agrees, but if any future change
+        reintroduces a gap, the quoted-price guard still stops the charge."""
         settings = _settings(remote_pricing=False)
         event, registration = _event(), _registration()
         moment = datetime(2026, 7, 29, 10, 0)
-        registration["discounted_payment_amount"] = self._displayed(
-            event, registration, moment
-        )
+        # quote the pre-fix (discounted) amount against the post-fix full charge
+        registration["discounted_payment_amount"] = 4100
         with pytest.raises(WebsiteBridgeError) as excinfo:
             await freeze_new_registration_snapshot(
                 _app(settings),
                 registration,
                 event,
                 calculation_date=moment.date(),
+                now=moment,
             )
         assert excinfo.value.code == "quoted_amount_mismatch"

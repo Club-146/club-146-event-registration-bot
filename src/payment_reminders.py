@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 
@@ -17,6 +18,15 @@ from src.payment_timeline import (
     reminder_kind_for_event,
     reminder_message,
 )
+
+# Same wall clock as event cutoffs / scheduler (not container UTC).
+_REMINDER_TZ = ZoneInfo("Europe/Moscow")
+
+
+def _now_moscow() -> datetime:
+    """Naive Moscow wall time so date comparisons match deadline calendar days."""
+    return datetime.now(_REMINDER_TZ).replace(tzinfo=None)
+
 
 CONTROL_COLLECTION = "payment_reminder_controls"
 KIND_FLAG = {
@@ -289,7 +299,7 @@ async def send_payment_reminders(
     *force_event_id* + *force_kind*: admin «send now» (ignores calendar day).
     *only_due_today*: when True, only kinds due on *now*'s date (unless force).
     """
-    now = now or datetime.now()
+    now = now or _now_moscow()
     stats: dict[str, Any] = {
         "events": 0,
         "d4": 0,
@@ -328,7 +338,7 @@ async def send_admin_previews(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Day before each reminder: summary + full text to events/logs chat."""
-    now = now or datetime.now()
+    now = now or _now_moscow()
     stats = {"previews": 0, "skipped": 0, "errors": 0}
     events = _eligible_events(await app.get_all_events())
 
@@ -374,15 +384,25 @@ async def send_admin_previews(
 async def list_upcoming_reminder_plan(
     app, *, now: Optional[datetime] = None, days_ahead: int = 14
 ) -> list[dict]:
-    """Plan rows for admin UI: next N days of previews + sends."""
+    """Plan rows for admin UI: next N days of previews + sends.
+
+    When d4 and d2 share a send day, only the d4 row is listed (one user message).
+    """
     from src.payment_timeline import reminder_send_day
 
-    now = now or datetime.now()
+    now = now or _now_moscow()
     plan = []
     events = _eligible_events(await app.get_all_events())
     for event in events:
         eid = _event_id(event)
-        for kind in ("d4", "d2"):
+        d4_day = reminder_send_day(event, "d4")
+        d2_day = reminder_send_day(event, "d2")
+        kinds: list[str] = []
+        if d4_day:
+            kinds.append("d4")
+        if d2_day and d2_day != d4_day:
+            kinds.append("d2")
+        for kind in kinds:
             send_day = reminder_send_day(event, kind)
             if not send_day:
                 continue
@@ -412,7 +432,7 @@ async def list_upcoming_reminder_plan(
 
 async def daily_reminder_tick(app, bot, *, now: Optional[datetime] = None) -> dict:
     """Scheduled job: admin previews for tomorrow + user sends due today."""
-    now = now or datetime.now()
+    now = now or _now_moscow()
     preview_stats = await send_admin_previews(app, now=now, dry_run=False)
     send_stats = await send_payment_reminders(
         app, bot, now=now, dry_run=False, only_due_today=True, respect_pause=True

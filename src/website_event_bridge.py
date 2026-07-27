@@ -296,12 +296,52 @@ def _formula_amount(formula: dict) -> int:
     return max(0, amount)
 
 
+def _resolved_early_bird(event: dict, now: datetime) -> tuple[int, str | None]:
+    """Resolve the early-bird discount against the bot's *displayed* cutoff.
+
+    There are two rules in play and they disagree for one day per event:
+
+    - what the bot shows the user comes from `payment_timeline`, whose cutoff is
+      **06:00 on the deadline day** -- deliberately the same instant as the food
+      and named-badge cutoffs (Maria/Petr, Jul 2026: "one shared cutoff for
+      early bird + named badges: D-3 = 29.07 for 01.08").
+    - the website re-evaluates the formula it is sent as
+      `calculation_date <= early_bird_deadline`, i.e. the whole day.
+
+    So for the Aug 1 2026 event, on 29 Jul after 06:00, the bot displayed the
+    full price while the frozen intent charged the discounted one.
+
+    The 06:00 cutoff is canonical. Resolving it here and zeroing the discount
+    once it has passed makes the website's whole-day comparison agree by
+    construction, without inventing a second cutoff.
+
+    Returns (effective_discount, deadline_iso). The deadline is always reported
+    when one exists, so the audit snapshot records it even on the days it no
+    longer applies -- when it does not apply the discount is 0, which is what
+    makes the website's comparison moot rather than wrong.
+
+    The deadline comes from `early_bird_deadline_at`, not the raw event field,
+    so the D-3 fallback for events with a discount but no explicit deadline is
+    honoured too -- otherwise the bot would display a discount and freeze a
+    charge without one.
+    """
+    from src.payment_timeline import early_bird_deadline_at
+
+    cutoff = early_bird_deadline_at(event)
+    if cutoff is None:
+        return 0, None
+    active = now < cutoff
+    discount = int(event.get("early_bird_discount", 0)) if active else 0
+    return discount, cutoff.date().isoformat()
+
+
 def build_new_intent_payload(
     settings: Any,
     registration: dict,
     event: dict,
     *,
     calculation_date: date,
+    now: datetime | None = None,
 ) -> tuple[dict, int]:
     """Build the one payload that will be persisted and replayed verbatim."""
     if not bridge_enabled_for(settings, event):
@@ -312,6 +352,10 @@ def build_new_intent_payload(
     source_id = _source_registration_id(registration)
     bot_event_id = _event_id(event)
     attendee_type = _clean(registration.get("graduate_type") or "GRADUATE").upper()
+    # Naive Moscow wall-clock: payment_timeline compares against naive
+    # datetime.combine(...) instants, so a tz-aware value here would raise.
+    moment = now or datetime.now(PRICING_TIMEZONE).replace(tzinfo=None)
+    early_bird_discount, early_bird_deadline = _resolved_early_bird(event, moment)
     formula = {
         "base_rubles": int(event.get("price_formula_base", 0)),
         "rate_rubles": int(event.get("price_formula_rate", 0)),
@@ -324,8 +368,8 @@ def build_new_intent_payload(
         "free_for_types": sorted(
             _clean(value).upper() for value in event.get("free_for_types", [])
         ),
-        "early_bird_discount_rubles": int(event.get("early_bird_discount", 0)),
-        "early_bird_deadline": _iso_date(event.get("early_bird_deadline")),
+        "early_bird_discount_rubles": early_bird_discount,
+        "early_bird_deadline": early_bird_deadline,
         "version": _pricing_version(event, calculation_date),
     }
     if formula["base_rubles"] < 1 or formula["step_years"] < 1:
@@ -443,6 +487,7 @@ async def freeze_new_registration_snapshot(
     event: dict | None,
     *,
     calculation_date: date | None = None,
+    now: datetime | None = None,
     client: "WebsiteEventBridgeClient | None" = None,
 ) -> dict | None:
     """Persist full pricing provenance only from the live registration flow."""
@@ -456,9 +501,12 @@ async def freeze_new_registration_snapshot(
     # Fails closed; never silently falls back to the Mongo config.
     event = await resolve_event_pricing(app.settings, event, client=client)
     assert event is not None
-    moment = calculation_date or datetime.now(PRICING_TIMEZONE).date()
+    # One instant for both the calculation date and the early-bird cutoff, so a
+    # registration crossing 06:00 mid-flow cannot be priced two ways.
+    instant = now or datetime.now(PRICING_TIMEZONE).replace(tzinfo=None)
+    moment = calculation_date or instant.date()
     payload, expected = build_new_intent_payload(
-        app.settings, registration, event, calculation_date=moment
+        app.settings, registration, event, calculation_date=moment, now=instant
     )
     _assert_matches_quoted_price(registration, expected)
     await _set_fields(
