@@ -130,6 +130,127 @@ def _iso_date(value: Any) -> str | None:
     raise WebsiteBridgeError("invalid_event_date")
 
 
+def remote_pricing_requested(settings: Any) -> bool:
+    """True only for an explicit literal enable flag."""
+    return getattr(settings, "event_payments_remote_pricing_enabled", False) is True
+
+
+def _remote_int(config: dict, key: str, *, minimum: int) -> int:
+    value = config.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise WebsiteBridgeError("invalid_remote_config")
+    if value < minimum or value > 1_000_000:
+        raise WebsiteBridgeError("invalid_remote_config")
+    return value
+
+
+def merge_remote_pricing(settings: Any, event: dict, config: dict) -> dict:
+    """Overlay the website's pricing onto a copy of the Mongo event document.
+
+    The overlaid keys deliberately keep the Mongo event document's own names, so
+    every existing consumer -- price display, guest quotes, the admin quote, the
+    frozen snapshot -- keeps reading the same keys off the same dict and cannot
+    end up reading two different sources. That is the whole point: authority
+    moves, call sites do not.
+
+    Fails closed on anything unexpected. In particular it re-checks the whole
+    mapping triple: a config that belongs to a different event is the one
+    failure that would silently charge the wrong price, and it is exactly what
+    a mistyped EVENT_PAYMENTS_* value produces.
+    """
+    if not isinstance(config, dict):
+        raise WebsiteBridgeError("invalid_remote_config")
+    if _clean(config.get("bot_event_id")) != _event_id(event):
+        raise WebsiteBridgeError("remote_config_event_mismatch")
+    if _clean(config.get("website_event_uid")) != _clean(
+        getattr(settings, "event_payments_website_event_uid", "")
+    ):
+        raise WebsiteBridgeError("remote_config_uid_mismatch")
+    if config.get("website_event_id") != getattr(
+        settings, "event_payments_website_event_id", None
+    ):
+        raise WebsiteBridgeError("remote_config_website_id_mismatch")
+
+    pricing_type = _clean(config.get("pricing_type"))
+    if pricing_type != "formula":
+        # 'free' and 'fixed_by_year' exist in Mongo but the intent payload has
+        # no representation for them, so refuse rather than silently price from
+        # a formula the website did not intend.
+        raise WebsiteBridgeError("unsupported_remote_pricing_type")
+
+    free_for_types = config.get("free_for_types")
+    if not isinstance(free_for_types, list) or not all(
+        isinstance(value, str) for value in free_for_types
+    ):
+        raise WebsiteBridgeError("invalid_remote_config")
+
+    resolved = dict(event)
+    resolved.update(
+        {
+            "pricing_type": pricing_type,
+            "price_formula_base": _remote_int(config, "price_formula_base", minimum=1),
+            "price_formula_rate": _remote_int(config, "price_formula_rate", minimum=0),
+            "price_formula_reference_year": _remote_int(
+                config, "price_formula_reference_year", minimum=1900
+            ),
+            "price_formula_step": _remote_int(config, "price_formula_step", minimum=1),
+            "guest_price_minimum": _remote_int(
+                config, "guest_price_minimum", minimum=0
+            ),
+            "guest_price_fixed": _remote_int(config, "guest_price_fixed", minimum=0),
+            "free_for_types": [value.strip().upper() for value in free_for_types],
+            "early_bird_discount": _remote_int(
+                config, "early_bird_discount", minimum=0
+            ),
+            # The wire format is an ISO date string; _iso_date() downstream rejects
+            # strings outright, so normalise to a real date here.
+            "early_bird_deadline": _remote_deadline(config.get("early_bird_deadline")),
+            "pricing_version": _clean(config.get("pricing_version"))[:80] or None,
+        }
+    )
+    if resolved["pricing_version"] is None:
+        resolved.pop("pricing_version", None)
+    return resolved
+
+
+def _remote_deadline(value: Any) -> date | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise WebsiteBridgeError("invalid_remote_config")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError as exc:
+        raise WebsiteBridgeError("invalid_remote_config") from exc
+
+
+async def resolve_event_pricing(
+    settings: Any,
+    event: dict | None,
+    *,
+    client: "WebsiteEventBridgeClient | None" = None,
+) -> dict | None:
+    """Return `event` priced by the website, or `event` unchanged when off.
+
+    Deliberately has no Mongo fallback. A fallback would silently charge a
+    stale price, and it would buy nothing: every caller that needs a price is
+    about to POST an intent to the same website, so a website that cannot serve
+    its config cannot mint the intent either.
+    """
+    if event is None:
+        return None
+    if not remote_pricing_requested(settings):
+        return event
+    if not bridge_enabled_for(settings, event):
+        # Not the mapped event -- the website holds no config for it, so Mongo
+        # remains its only possible source and that is not a divergence.
+        return event
+    config = await (client or WebsiteEventBridgeClient(settings)).get_event_config(
+        _event_id(event)
+    )
+    return merge_remote_pricing(settings, event, config)
+
+
 def _pricing_version(event: dict, calculation_date: date) -> str:
     explicit = _clean(event.get("pricing_version"))
     if explicit:
@@ -276,12 +397,53 @@ async def _set_fields(app: Any, registration: dict, fields: dict[str, Any]) -> N
     bridge["source_registration_id"] = source_id
 
 
+def _assert_matches_quoted_price(registration: dict, expected: int) -> None:
+    """Refuse to freeze a charge that differs from the price the user was shown.
+
+    The bot computes a price in several places for display (`calculate_event_payment`,
+    `calculate_guest_price`) and the bridge computes it again to freeze the
+    charge. Nothing used to compare the two, and they can genuinely disagree:
+
+    - the display path resolves early bird via `payment_timeline`, whose cutoff
+      is 06:00 on the deadline day, while the frozen formula is re-evaluated by
+      the website as `calculation_date <= early_bird_deadline`, i.e. the whole
+      day. For the Aug 1 2026 event (deadline 29 Jul) that is a real one-day
+      window in which the bot displays the full price and the intent freezes the
+      discounted one.
+    - once pricing authority moves to the website, the display path could still
+      be reading a stale Mongo config.
+
+    Either way the failure mode is the same and it involves other people's
+    money, so compare and stop rather than guess which side is right. This is
+    raised as a WebsiteBridgeError, which the registration flow already handles
+    by marking the row `snapshot_re_registration_required` -- nobody is charged
+    and an admin can see it.
+    """
+    quoted = registration.get("discounted_payment_amount")
+    if quoted is None:
+        # Nothing was quoted (legacy or admin-created rows), so there is no
+        # promise to contradict.
+        return
+    if isinstance(quoted, bool) or not isinstance(quoted, int):
+        raise WebsiteBridgeError("invalid_quoted_amount")
+    if quoted != expected:
+        logger.error(
+            "Refusing to freeze website snapshot: bot quoted {} but the frozen "
+            "intent totals {}. Registration {} left unfrozen.",
+            quoted,
+            expected,
+            registration.get("_id"),
+        )
+        raise WebsiteBridgeError("quoted_amount_mismatch")
+
+
 async def freeze_new_registration_snapshot(
     app: Any,
     registration: dict,
     event: dict | None,
     *,
     calculation_date: date | None = None,
+    client: "WebsiteEventBridgeClient | None" = None,
 ) -> dict | None:
     """Persist full pricing provenance only from the live registration flow."""
     if not bridge_enabled_for(app.settings, event):
@@ -290,10 +452,15 @@ async def freeze_new_registration_snapshot(
     if isinstance(existing, dict):
         return existing
     assert event is not None
+    # The website is the source of truth for price when remote pricing is on.
+    # Fails closed; never silently falls back to the Mongo config.
+    event = await resolve_event_pricing(app.settings, event, client=client)
+    assert event is not None
     moment = calculation_date or datetime.now(PRICING_TIMEZONE).date()
     payload, expected = build_new_intent_payload(
         app.settings, registration, event, calculation_date=moment
     )
+    _assert_matches_quoted_price(registration, expected)
     await _set_fields(
         app,
         registration,
@@ -455,8 +622,36 @@ class WebsiteEventBridgeClient:
             raise WebsiteBridgeError("invalid_json")
         return value
 
+    async def _get(self, endpoint: str) -> dict:
+        headers = {"Authorization": f"Bearer {self.token}"}
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout, follow_redirects=False
+            ) as client:
+                response = await client.get(
+                    f"{self.base_url}{endpoint}", headers=headers
+                )
+        except httpx.TimeoutException as exc:
+            raise WebsiteBridgeError("timeout") from exc
+        except httpx.HTTPError as exc:
+            raise WebsiteBridgeError("network_error") from exc
+        if response.status_code < 200 or response.status_code >= 300:
+            raise WebsiteBridgeError(f"http_{response.status_code}")
+        try:
+            value = response.json()
+        except ValueError as exc:
+            raise WebsiteBridgeError("invalid_json") from exc
+        if not isinstance(value, dict):
+            raise WebsiteBridgeError("invalid_json")
+        return value
+
     async def create_or_replay(self, payload: dict) -> dict:
         return await self._post("/api/internal/event-payment-intents", payload)
+
+    async def get_event_config(self, bot_event_id: str) -> dict:
+        """Read this bot event's pricing config from the website."""
+        event = quote(bot_event_id, safe="")
+        return await self._get(f"/api/internal/event-configs/by-bot-event/{event}")
 
     async def confirm(
         self, source_id: str, *, paid_amount: int, evidence_reference: str

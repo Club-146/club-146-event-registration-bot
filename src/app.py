@@ -92,6 +92,16 @@ class AppSettings(BaseSettings):
     event_payments_website_event_id: Optional[int] = None
     event_payments_website_event_uid: str = ""
     event_payments_bot_event_id: str = ""
+    # Read pricing from the website's event_registration_configs instead of the
+    # Mongo event document, making the website the single source of truth for
+    # price. Separate flag from the bridge itself so pricing authority can be
+    # moved without touching the checkout path, and rolled back on its own.
+    #
+    # Fail-closed on purpose, with no Mongo fallback: a fallback would silently
+    # charge a stale price, and it buys no availability anyway -- the very next
+    # call in this flow is a POST to the same website, so if the config fetch
+    # cannot reach it, the intent could not have been created either.
+    event_payments_remote_pricing_enabled: bool = False
     event_payments_api_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     event_payments_sync_interval_seconds: float = Field(default=15.0, ge=5, le=300)
 
