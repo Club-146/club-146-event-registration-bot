@@ -85,8 +85,7 @@ def _validated_base_url(value: Any) -> str:
     raw = str(value or "").strip().rstrip("/")
     parsed = urlsplit(raw)
     if (
-        parsed.scheme != "https"
-        or not parsed.hostname
+        not parsed.hostname
         or parsed.username
         or parsed.password
         or parsed.query
@@ -94,7 +93,15 @@ def _validated_base_url(value: Any) -> str:
         or parsed.path not in ("", "/")
     ):
         raise WebsiteBridgeError("invalid_api_base_url")
-    return raw
+    # Production/staging always HTTPS. Plain HTTP is accepted only on loopback
+    # so the local mock server (dev/mock_website_event_payments) can be used
+    # without certificates. Never for remote hosts.
+    loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    if parsed.scheme == "https":
+        return raw
+    if parsed.scheme == "http" and loopback:
+        return raw
+    raise WebsiteBridgeError("invalid_api_base_url")
 
 
 def bridge_requested(settings: Any) -> bool:
@@ -216,6 +223,9 @@ def build_new_intent_payload(
         amount = int(amount or 0)
         if amount < 1:
             raise WebsiteBridgeError("invalid_guest_price")
+        # Website GuestTerms still accepts name+fixed amount only. Graduation
+        # year/letter are bot-side provenance for pricing and display; they are
+        # not part of the wire payload until the website expands GuestTerms.
         guests.append(
             {
                 "display_name": _clean(guest.get("name")),
@@ -229,6 +239,12 @@ def build_new_intent_payload(
     expected_amount = _formula_amount(formula) + sum(
         guest["fixed_amount_rubles"] for guest in guests
     )
+    # TODO(source-vocabulary): website still hardcodes
+    # source_system="club146_registry_bot" and the create payload has no
+    # source_system field. Shared dictionary (telegram_bot / website / vk /
+    # manual_admin) is not landed on the website yet — do not send a new value
+    # unilaterally; a mismatch fails the mapping check closed. Coordinate with
+    # the website session before changing this.
     payload = {
         "website_event_id": int(settings.event_payments_website_event_id),
         "website_event_uid": _clean(settings.event_payments_website_event_uid),

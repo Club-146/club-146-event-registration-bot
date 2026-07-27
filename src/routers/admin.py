@@ -11,13 +11,14 @@ from aiogram.types import (
 from litellm import acompletion
 from loguru import logger
 from pydantic import BaseModel
-from src.app import App
+from src.app import App, GraduateType, RegisteredUser
 from src.ticket_cards import send_paid_ticket_card
 from src.website_event_bridge import (
     WebsiteBridgeError,
     bridge_requested,
     confirmation_reference,
     confirm_registration_payment,
+    freeze_new_registration_snapshot,
     send_website_ticket_links,
 )
 from botspot import commands_menu
@@ -57,6 +58,7 @@ _ADMIN_SUBMENUS = {
         "Управление:",
         {
             "manage_events": "Управление встречами",
+            "manual_register": "Зарегистрировать человека вручную",
             "register_payment": "Зарегистрировать оплату (за другого участника)",
             "discretionary": "Скидка / бесплатный вход (решение Марии)",
             "payment_reminders": "Напоминания об оплате (D-4 / D-2)",
@@ -111,6 +113,8 @@ async def _dispatch_admin_action(
         from src.routers.events import manage_events_handler
 
         await manage_events_handler(message, state, app=app)
+    elif response == "manual_register":
+        await admin_manual_register(message, state, app)
     elif response == "register_payment":
         await admin_register_payment(message, state, app)
     elif response == "discretionary":
@@ -303,6 +307,253 @@ async def _send_admin_confirmed_ticket(
         logger.warning(
             f"Could not deliver confirmed ticket for user {target_user_id}: {e}"
         )
+
+
+async def admin_manual_register(message: Message, state: FSMContext, app: App) -> None:
+    """Register a person without requiring them to open the bot (user_id may be None).
+
+    Replaces Maria editing Mongo by hand for people who write to the club off-Telegram.
+    start_source is stamped ``manual_admin``. Guests collect year/letter so pricing
+    and the website intent stay valid.
+    """
+    chat_id = message.chat.id
+    event_id = await _select_event_for_payment(chat_id, state, app)
+    if not event_id:
+        return
+
+    event = await app.get_event_by_id(event_id)
+    if not event:
+        await send_safe(chat_id, "Встреча не найдена.")
+        return
+
+    name_resp = await ask_user_raw(
+        chat_id,
+        "ФИО участника (как в списке на входе):",
+        state=state,
+        timeout=None,
+    )
+    if not name_resp or not name_resp.text or len(name_resp.text.strip()) < 2:
+        await send_safe(chat_id, "Отменено: нужно имя.")
+        return
+    full_name = name_resp.text.strip()
+
+    type_choice = await ask_user_choice(
+        chat_id,
+        f"Тип участника для {full_name}:",
+        choices={
+            "GRADUATE": "Выпускник",
+            "TEACHER": "Учитель",
+            "NON_GRADUATE": "Друг / не выпускник",
+            "ORGANIZER": "Организатор",
+            "cancel": "Отмена",
+        },
+        state=state,
+        timeout=None,
+    )
+    if type_choice in (None, "cancel"):
+        await send_safe(chat_id, "Отменено.")
+        return
+    graduate_type = GraduateType(type_choice)
+
+    graduation_year = 2000
+    class_letter = "-"
+    if graduate_type == GraduateType.GRADUATE:
+        year_resp = await ask_user_raw(
+            chat_id,
+            "Год выпуска и класс (например 2010А):",
+            state=state,
+            timeout=None,
+        )
+        year_text = year_resp.text.strip() if year_resp and year_resp.text else ""
+        year, letter, error = app.parse_graduation_year_and_class_letter(year_text)
+        if error or year is None or not letter:
+            # Allow year-only then ask letter.
+            if year is not None and not letter:
+                letter_resp = await ask_user_raw(
+                    chat_id, "Буква класса:", state=state, timeout=None
+                )
+                letter = (
+                    letter_resp.text.strip().upper()
+                    if letter_resp and letter_resp.text
+                    else ""
+                )
+                valid, err = app.validate_class_letter(letter)
+                if not valid:
+                    await send_safe(chat_id, f"Отменено: {err or error}")
+                    return
+                graduation_year, class_letter = int(year), letter
+            else:
+                await send_safe(
+                    chat_id, f"Отменено: {error or 'некорректный год/класс'}"
+                )
+                return
+        else:
+            graduation_year, class_letter = int(year), letter.upper()
+    elif graduate_type == GraduateType.TEACHER:
+        class_letter = "У"
+    elif graduate_type == GraduateType.ORGANIZER:
+        class_letter = "О"
+
+    tg_resp = await ask_user_raw(
+        chat_id,
+        "Telegram user_id (число) или @username — или «-» если нет Telegram:",
+        state=state,
+        timeout=None,
+    )
+    tg_text = (tg_resp.text or "").strip() if tg_resp and tg_resp.text else "-"
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    if tg_text not in {"-", "—", "нет", "no", ""}:
+        if tg_text.startswith("@"):
+            username = tg_text[1:]
+        elif tg_text.isdigit():
+            user_id = int(tg_text)
+        else:
+            username = tg_text.lstrip("@")
+
+    guests: list[dict] = []
+    if event.get("guests_enabled"):
+        from src.router import _collect_guest_names
+
+        max_guests = int(event.get("max_guests_per_person", 3) or 3)
+        guest_choices = {"0": "Без гостей"}
+        for i in range(1, max_guests + 1):
+            guest_choices[str(i)] = f"+{i}"
+        guest_choices["cancel"] = "Отмена"
+        guest_count_resp = await ask_user_choice(
+            chat_id,
+            "Гости с этим человеком?",
+            choices=guest_choices,
+            state=state,
+            timeout=None,
+        )
+        if guest_count_resp == "cancel":
+            await send_safe(chat_id, "Отменено.")
+            return
+        guest_count = (
+            int(guest_count_resp)
+            if guest_count_resp and guest_count_resp.isdigit()
+            else 0
+        )
+        if guest_count > 0:
+            guests = await _collect_guest_names(
+                message, state, guest_count, [], app, event
+            )
+
+    regular, _, discounted, _ = app.calculate_event_payment(
+        event, graduation_year, graduate_type.value
+    )
+    guest_total = sum(g.get("price", 0) for g in guests)
+    guest_total_disc = sum(g.get("price_discounted", g.get("price", 0)) for g in guests)
+    total = regular + guest_total
+    total_disc = discounted + guest_total_disc
+
+    confirm = await ask_user_choice(
+        chat_id,
+        (
+            f"Сохранить регистрацию?\n"
+            f"• {full_name}\n"
+            f"• {graduation_year}{class_letter}, {graduate_type.value}\n"
+            f"• Telegram: {user_id or username or 'нет'}\n"
+            f"• Гости: {len(guests)}\n"
+            f"• Сумма: {total}₽"
+            + (f" (ранняя {total_disc}₽)" if total_disc != total else "")
+            + "\n• source: manual_admin"
+        ),
+        choices={"yes": "Сохранить", "cancel": "Отмена"},
+        state=state,
+        timeout=None,
+    )
+    if confirm != "yes":
+        await send_safe(chat_id, "Отменено.")
+        return
+
+    registered = RegisteredUser(
+        full_name=full_name,
+        graduation_year=graduation_year,
+        class_letter=class_letter,
+        target_city=event.get("city", ""),
+        event_id=str(event["_id"]),
+        graduate_type=graduate_type,
+        start_source="manual_admin",
+        user_id=user_id,
+        username=username,
+    )
+    await app.save_registered_user(registered, user_id=user_id, username=username)
+
+    # Reload to get Mongo _id for guest save + bridge freeze.
+    if user_id is not None:
+        registration = await app.collection.find_one(
+            {"user_id": user_id, "event_id": str(event["_id"])}
+        )
+    else:
+        registration = await app.collection.find_one(
+            {
+                "full_name": full_name,
+                "event_id": str(event["_id"]),
+                "start_source": "manual_admin",
+                "user_id": {"$in": [None]},
+            },
+            sort=[("_id", -1)],
+        )
+        if registration is None:
+            # motor may store missing user_id rather than null
+            registration = await app.collection.find_one(
+                {
+                    "full_name": full_name,
+                    "event_id": str(event["_id"]),
+                    "start_source": "manual_admin",
+                },
+                sort=[("_id", -1)],
+            )
+
+    if registration is None:
+        await send_safe(chat_id, "Ошибка: регистрация не сохранилась.")
+        return
+
+    if guests:
+        await app.save_registration_guests(
+            user_id,
+            str(event["_id"]),
+            guests,
+            registration_id=registration["_id"],
+        )
+        registration["guests"] = guests
+        registration["guest_count"] = len(guests)
+
+    bridge_note = ""
+    try:
+        snapshot = await freeze_new_registration_snapshot(app, registration, event)
+        if snapshot is not None:
+            bridge_note = "\nCheckout 146.school: snapshot зафиксирован."
+    except WebsiteBridgeError as exc:
+        bridge_note = (
+            f"\n⚠️ Bridge snapshot не создан (код: {exc.code}). "
+            "Локальная запись сохранена."
+        )
+        logger.warning("Admin manual register freeze failed: {}", exc.code)
+
+    await app.save_event_log(
+        "admin_manual_register",
+        {
+            "action": "manual_register",
+            "full_name": full_name,
+            "event_id": str(event["_id"]),
+            "graduation_year": graduation_year,
+            "class_letter": class_letter,
+            "graduate_type": graduate_type.value,
+            "guest_count": len(guests),
+            "start_source": "manual_admin",
+            "registration_id": str(registration["_id"]),
+        },
+        message.from_user.id if message.from_user else None,
+        message.from_user.username if message.from_user else None,
+    )
+    await send_safe(
+        chat_id,
+        f"✅ Зарегистрирован: {full_name} (id={registration['_id']}).{bridge_note}",
+    )
+    await app.export_registered_users_to_google_sheets()
 
 
 async def admin_register_payment(message: Message, state: FSMContext, app: App):

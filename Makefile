@@ -1,10 +1,14 @@
-.PHONY: check fix fix-unsafe help run run-debug test release-prod
+.PHONY: check fix fix-unsafe help run run-debug test mock-website-api release-prod
 
 run:
 	uv run python run.py
 
 run-debug:
 	uv run python run.py --debug
+
+# Local mock of 146.school event-payment internal API (loopback only).
+mock-website-api:
+	uv run python -m dev.mock_website_event_payments.server
 
 # Run all CI checks locally
 check:
@@ -45,9 +49,10 @@ release-prod:
 
 help:
 	@echo "Available targets:"
-	@echo "  check         - Run all linters and type checks (continues past failures)"
-	@echo "  fix           - Auto-fix lint issues and format code"
-	@echo "  fix-unsafe    - Auto-fix with unsafe fixes enabled"
-	@echo "  test          - Run tests with coverage"
-	@echo "  release-prod  - push dev → PR → merge to main (Coolify prod)"
-	@echo "  help          - Show this help message"
+	@echo "  check             - Run all linters and type checks (continues past failures)"
+	@echo "  fix               - Auto-fix lint issues and format code"
+	@echo "  fix-unsafe        - Auto-fix with unsafe fixes enabled"
+	@echo "  test              - Run tests with coverage"
+	@echo "  mock-website-api  - Local mock of website event-payment internal API"
+	@echo "  release-prod      - push dev → PR → merge to main (Coolify prod)"
+	@echo "  help              - Show this help message"
