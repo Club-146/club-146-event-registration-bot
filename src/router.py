@@ -81,7 +81,14 @@ def _payment_status_emoji(status: str) -> str:
 def _format_guest_summary(guests: List[Dict]) -> str:
     summary = f"👥 Гости ({len(guests)}):\n"
     for i, g in enumerate(guests, 1):
-        summary += f"  {i}. {g['name']} — {g['price']}₽\n"
+        year = g.get("graduation_year")
+        letter = g.get("class_letter")
+        meta = ""
+        if year and letter and letter not in {"-", "—"}:
+            meta = f", {year}{letter}"
+        elif g.get("graduate_type") == GraduateType.NON_GRADUATE.value:
+            meta = ", друг"
+        summary += f"  {i}. {g['name']}{meta} — {g['price']}₽\n"
     guest_total = sum(g["price"] for g in guests)
     guest_total_discounted = sum(g.get("price_discounted", g["price"]) for g in guests)
     if guest_total != guest_total_discounted:
@@ -424,22 +431,13 @@ async def _edit_guests(
         )
         return
 
-    graduation_year = reg.get("graduation_year", 2000)
-    graduate_type = reg.get("graduate_type", GraduateType.GRADUATE.value)
-    reg_amount, _, _, _ = app.calculate_event_payment(
-        event, graduation_year, graduate_type
-    )
-    guest_price_regular, guest_price_discounted = app.calculate_guest_price(
-        event, reg_amount
-    )
-
     guests = await _collect_guest_names(
         message,
         state,
         guest_count,
         existing_guests,
-        guest_price_regular,
-        guest_price_discounted,
+        app,
+        event,
     )
 
     await app.save_registration_guests(user_id, reg_event_id, guests)
@@ -463,16 +461,16 @@ async def _collect_guest_names(
     state: FSMContext,
     guest_count: int,
     existing_guests: List[Dict],
-    guest_price_regular: int,
-    guest_price_discounted: int,
+    app: App,
+    event: Dict,
 ) -> List[Dict]:
+    """Collect name + graduation year/letter per guest and price each one."""
     from src.user_interactions import ask_user_raw
 
     guests = []
     for i in range(1, guest_count + 1):
-        default_hint = ""
-        if i <= len(existing_guests):
-            default_hint = f" (было: {existing_guests[i - 1]['name']})"
+        existing = existing_guests[i - 1] if i <= len(existing_guests) else {}
+        default_hint = f" (было: {existing['name']})" if existing.get("name") else ""
         name_resp = await ask_user_raw(
             message.chat.id,
             f"Имя гостя {i}{default_hint}:",
@@ -484,14 +482,68 @@ async def _collect_guest_names(
             guest_name = name_resp.text.strip()
         if len(guest_name) < 2:
             guest_name = f"Гость {i}"
+
+        year_hint = ""
+        if existing.get("graduation_year") and existing.get("class_letter"):
+            year_hint = (
+                f" (было: {existing['graduation_year']}{existing['class_letter']})"
+            )
+        year_resp = await ask_user_raw(
+            message.chat.id,
+            f"Год выпуска и класс гостя {i} (например 2010А) или «друг»{year_hint}:",
+            state=state,
+            timeout=None,
+        )
+        year_text = (
+            (year_resp.text or "").strip() if year_resp and year_resp.text else ""
+        )
+        graduation_year, class_letter, graduate_type = _parse_guest_graduation(
+            app, year_text, existing
+        )
+        price, price_discounted = app.calculate_guest_price(
+            event, graduation_year, graduate_type
+        )
         guests.append(
             {
                 "name": guest_name,
-                "price": guest_price_regular,
-                "price_discounted": guest_price_discounted,
+                "graduation_year": graduation_year,
+                "class_letter": class_letter,
+                "graduate_type": graduate_type,
+                "price": price,
+                "price_discounted": price_discounted,
             }
         )
     return guests
+
+
+def _parse_guest_graduation(
+    app: App, year_text: str, existing: Dict
+) -> tuple[int, str, str]:
+    """Return (graduation_year, class_letter, graduate_type) for one guest."""
+    lowered = year_text.casefold()
+    if lowered in {"друг", "friend", "non_graduate", "не выпускник", "-"}:
+        return 2000, "-", GraduateType.NON_GRADUATE.value
+
+    year, letter, error = app.parse_graduation_year_and_class_letter(year_text)
+    if not error and year is not None and letter:
+        return int(year), letter.upper(), GraduateType.GRADUATE.value
+
+    # Year only (e.g. "2010") — letter required for graduates; fall back carefully.
+    if year_text.isdigit() and len(year_text) == 4:
+        y = int(year_text)
+        if 1950 <= y <= 2035:
+            letter = (existing.get("class_letter") or "А").upper()
+            return y, letter, GraduateType.GRADUATE.value
+
+    if existing.get("graduation_year") and existing.get("class_letter"):
+        return (
+            int(existing["graduation_year"]),
+            str(existing["class_letter"]).upper(),
+            existing.get("graduate_type", GraduateType.GRADUATE.value),
+        )
+
+    # Default: treat as friend so pricing uses guest_price_minimum / non-grad path.
+    return 2000, "-", GraduateType.NON_GRADUATE.value
 
 
 async def manage_registrations(
@@ -1126,15 +1178,8 @@ async def _collect_guests_step(
         await _append_log(user_id, log_msg)
         return []
 
-    reg_amount, _, _, _ = app.calculate_event_payment(
-        selected_event, graduation_year, graduate_type.value
-    )
-    guest_price_regular, guest_price_discounted = app.calculate_guest_price(
-        selected_event, reg_amount
-    )
-
     guests = await _collect_guest_names(
-        message, state, guest_count, [], guest_price_regular, guest_price_discounted
+        message, state, guest_count, [], app, selected_event
     )
 
     await send_safe(message.chat.id, _format_guest_summary(guests))

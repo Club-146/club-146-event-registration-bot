@@ -300,14 +300,23 @@ def reminder_kind_for_event(
 def admin_preview_kinds_for_event(
     event: dict, now: Optional[datetime] = None
 ) -> list[str]:
-    """Kinds whose user-reminder day is **tomorrow** (admin preview day)."""
+    """Kinds whose user-reminder day is **tomorrow** (admin preview day).
+
+    Same-day rule as ``reminder_kind_for_event``: if both d4 and d2 would
+    fire tomorrow, only preview d4 (combined copy). Two admin previews for
+    one user send is noise and implies two messages when there is one.
+    """
     now = now or datetime.now()
     tomorrow = now.date() + timedelta(days=ADMIN_PREVIEW_DAYS_BEFORE_REMINDER)
+    d4_day = reminder_send_day(event, "d4")
+    d2_day = reminder_send_day(event, "d2")
     kinds: list[str] = []
-    for kind in ("d4", "d2"):
-        send_day = reminder_send_day(event, kind)
-        if send_day and tomorrow == send_day:
-            kinds.append(kind)
+    if d4_day and tomorrow == d4_day:
+        kinds.append("d4")
+        # d4 already covers the shared early-bird+badge morning.
+        return kinds
+    if d2_day and tomorrow == d2_day:
+        kinds.append("d2")
     return kinds
 
 

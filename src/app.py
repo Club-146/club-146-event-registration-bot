@@ -92,6 +92,16 @@ class AppSettings(BaseSettings):
     event_payments_website_event_id: Optional[int] = None
     event_payments_website_event_uid: str = ""
     event_payments_bot_event_id: str = ""
+    # Read pricing from the website's event_registration_configs instead of the
+    # Mongo event document, making the website the single source of truth for
+    # price. Separate flag from the bridge itself so pricing authority can be
+    # moved without touching the checkout path, and rolled back on its own.
+    #
+    # Fail-closed on purpose, with no Mongo fallback: a fallback would silently
+    # charge a stale price, and it buys no availability anyway -- the very next
+    # call in this flow is a POST to the same website, so if the config fetch
+    # cannot reach it, the intent could not have been created either.
+    event_payments_remote_pricing_enabled: bool = False
     event_payments_api_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     event_payments_sync_interval_seconds: float = Field(default=15.0, ge=5, le=300)
 
@@ -660,24 +670,33 @@ class App:
         return 0, 0, 0, 0
 
     def calculate_guest_price(
-        self, event: Dict, registrant_price: int
+        self,
+        event: Dict,
+        graduation_year: int,
+        graduate_type: str = GraduateType.GRADUATE.value,
     ) -> Tuple[int, int]:
-        """Calculate the price for a single guest.
+        """Calculate the price for a single guest from *their* graduation year.
+
+        Guests are priced with the same event formula as registrants (using the
+        guest's year/type), then floored at ``guest_price_minimum`` for paid
+        types. Early-bird discount follows the event timeline.
 
         Returns: (regular_price, discounted_price)
-        regular_price = max(guest_price_minimum, registrant_price)
-        discounted_price = regular_price - early_bird_discount (if applicable)
+
+        Zero-price guests (free-listed types) stay at 0 — the website bridge
+        rejects them in the intent payload for this slice.
         """
-        minimum = event.get("guest_price_minimum", 0)
-        regular_price = max(minimum, registrant_price)
+        regular_price, discount, discounted_price, _ = self.calculate_event_payment(
+            event, graduation_year, graduate_type
+        )
+        free_for = event.get("free_for_types", [])
+        if graduate_type in free_for:
+            return 0, 0
 
-        from src.payment_timeline import is_early_bird_active
-
-        early_bird_discount = int(event.get("early_bird_discount") or 0)
-        if early_bird_discount > 0 and is_early_bird_active(event):
-            discounted_price = max(0, regular_price - early_bird_discount)
-        else:
-            discounted_price = regular_price
+        minimum = int(event.get("guest_price_minimum") or 0)
+        if minimum > 0:
+            regular_price = max(minimum, regular_price)
+            discounted_price = max(0, regular_price - discount)
 
         return regular_price, discounted_price
 
@@ -783,17 +802,30 @@ class App:
         await self.save_event_log("user_registration", log_data, user_id, username)
 
     async def save_registration_guests(
-        self, user_id: int, event_id: str, guests: List[Dict]
+        self,
+        user_id: Optional[int],
+        event_id: str,
+        guests: List[Dict],
+        *,
+        registration_id: Optional[Any] = None,
     ):
         """Save guest list to an existing registration.
 
         Args:
-            user_id: Telegram user ID
+            user_id: Telegram user ID (None for admin manual registrations)
             event_id: Event ID from events collection
-            guests: list of {"name": str, "price": int}
+            guests: list of guest dicts (name, price, optional year/letter)
+            registration_id: optional Mongo ``_id`` when ``user_id`` is missing
         """
+        query: Dict[str, Any]
+        if registration_id is not None:
+            query = {"_id": registration_id, "event_id": event_id}
+        elif user_id is not None:
+            query = {"user_id": user_id, "event_id": event_id}
+        else:
+            raise ValueError("user_id or registration_id is required")
         await self.collection.update_one(
-            {"user_id": user_id, "event_id": event_id},
+            query,
             {"$set": {"guests": guests, "guest_count": len(guests)}},
         )
 

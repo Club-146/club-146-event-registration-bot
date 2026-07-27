@@ -115,3 +115,138 @@ IDs (`bot_registration_id`, `telegram_user_id`, `bot_event_id`),
 `website_event_uid`, immutable `amount_minor`/`currency`, attendee name, and an
 email only if CloudPayments requires it. Event, amount, purpose, and payment
 frequency must not be editable through public URL parameters.
+
+## Local mock + what is tested
+
+Bot-side mock of the website internal API lives at
+`dev/mock_website_event_payments/` (stdlib HTTP server, no FastAPI).
+
+```bash
+make mock-website-api
+# or: uv run python -m dev.mock_website_event_payments.server --port 8765
+```
+
+Point a throwaway **local** process only:
+
+```bash
+EVENT_PAYMENTS_BRIDGE_ENABLED=true
+EVENT_PAYMENTS_WEBSITE_API_BASE_URL=http://127.0.0.1:8765
+EVENT_PAYMENTS_WEBSITE_API_TOKEN=test-dedicated-token
+EVENT_PAYMENTS_WEBSITE_EVENT_ID=1
+EVENT_PAYMENTS_WEBSITE_EVENT_UID=aug1-2026-perm
+EVENT_PAYMENTS_BOT_EVENT_ID=<mapped mongo events._id>
+```
+
+Loopback plain HTTP (`127.0.0.1` / `localhost` / `::1`) is accepted so the mock
+can run without TLS. Non-loopback base URLs still require HTTPS. Do not enable
+the bridge in committed env, docker-compose, Dockerfile, or Coolify while the
+infra session is rewiring the dev bot.
+
+Covered by automated tests:
+
+- Unit bridge behaviour (`tests/test_website_event_bridge.py`) with an in-process
+  FakeClient.
+- Mock domain service (`tests/test_mock_website_event_payments.py`): formula,
+  idempotent create/replay, 409 conflict, confirm, revoke, zero-price guest
+  rejection.
+- HTTP e2e (`tests/test_website_event_bridge_e2e.py`): real
+  `WebsiteEventBridgeClient` against the mock server — freeze snapshot → create
+  → replay → confirm → revoke; provider-paid background sync; manual-admin
+  registration shape (`user_id=None`) with a priced guest; loopback HTTP URL
+  rule.
+- Guest year/letter pricing (`App.calculate_guest_price(event, year, type)`);
+  admin manual registration flow.
+
+Still untestable without the live/staging website: CloudPayments webhook,
+HMAC group-page HTML, real PostgreSQL uniqueness races, and the website's
+confirm JSON shape under production code (see contradiction note below).
+
+### Contract notes found during mock work
+
+1. **Confirm response `fixed_amount` — RESOLVED 2026-07-27, website side.**
+   The bot's `_normalise_response` reads exactly four keys off every
+   status-shaped response and rejects the whole exchange if any is missing:
+
+   | key | meaning |
+   |---|---|
+   | `status` | one of `REMOTE_STATUSES` |
+   | `fixed_amount` | the **frozen expected total**, never the sum actually paid |
+   | `group_status_path` | must be under `/event-pay/` |
+   | `admissions` | one entry per human, count must match the snapshot |
+
+   Live `confirm_event_payment_intent` returned status/admissions/path only,
+   while the mock returned `fixed_amount` — so the bot suite was green and the
+   first real confirmation would have failed with `invalid_remote_amount`.
+   The website now returns `fixed_amount` from `confirm` and from
+   `import-legacy-confirmation`, pinned by
+   `test_confirm_response_carries_the_frozen_amount_not_the_paid_one` in
+   `newsite/tests/test_event_payments.py` — a test against the **real route**,
+   which is the part that was missing.
+
+   The bot was deliberately *not* loosened to fall back to the frozen amount:
+   re-deriving the value locally would make `remote_amount_mismatch`
+   unfalsifiable, and that check is what detects a website that has silently
+   repriced a group.
+
+   **Rule this leaves behind:** a mock is not evidence. Any field the bot
+   requires must be asserted against the website's own route, or the two
+   drift again in exactly this direction.
+2. **`source_system` vocabulary.** Website hardcodes
+   `SOURCE_SYSTEM = "club146_registry_bot"`. Shared dictionary
+   (`telegram_bot` / `website` / `vk` / `manual_admin`) is not landed yet. Bot
+   does not send `source_system` in the create payload; admin manual
+   registrations stamp bot-side `start_source=manual_admin` only. Do not change
+   the value the website stores until both sides land the dictionary together.
+3. **Guest wire payload.** Guests still go over the wire as name + fixed amount
+   only. Graduation year/letter are stored on the bot registration for pricing
+   and display; expanding website `GuestTerms` is a follow-up.
+4. **Pricing config endpoint — RESOLVED 2026-07-27.** It exists:
+   `GET /api/internal/event-configs/by-bot-event/{bot_event_id}` (also
+   `by-uid/{website_event_uid}`, a bare list, and a `PUT` for upserts). It
+   landed in the same window as the mock work, which is why the two sessions
+   missed each other.
+
+   The bot now reads it behind `EVENT_PAYMENTS_REMOTE_PRICING_ENABLED`
+   (`resolve_event_pricing`), separate from the bridge flag so pricing
+   authority can move — and roll back — without touching checkout.
+
+   - The overlaid keys keep the **Mongo document's own names**, so display,
+     guest quotes, the admin quote and the frozen snapshot all keep reading one
+     dict. Authority moves; call sites do not.
+   - **Fails closed, no Mongo fallback.** A fallback would silently charge a
+     stale price and buys no availability: the next call is a POST to the same
+     host, so a website that cannot serve config cannot mint the intent either.
+   - The **whole mapping triple** (`bot_event_id`, `website_event_uid`,
+     `website_event_id`) is re-checked against the config actually served. A
+     mistyped `EVENT_PAYMENTS_*` is the one failure that would otherwise price
+     the wrong event silently.
+   - Only `pricing_type == "formula"` is accepted; `free` and `fixed_by_year`
+     have no intent-payload representation, so they are refused rather than
+     coerced.
+   - Existing registrations still never rebuild from remote config
+     (`WebsiteSnapshotRequired`) — that is unchanged and must stay.
+
+   ⚠️ The website's `create_intent` does **not** validate the formula it is
+   sent; it trusts it verbatim. So nothing except this endpoint makes the two
+   channels agree — there is no server-side backstop.
+
+5. **Displayed price vs frozen price — one open decision.** The bot computes
+   price for display (`calculate_event_payment`) and the bridge computes it
+   again to freeze the charge, and the two resolve early bird differently:
+   display uses `payment_timeline`, whose cutoff is **06:00 on the deadline
+   day**; the frozen formula is re-evaluated by the website as
+   `calculation_date <= early_bird_deadline`, i.e. **the whole day**.
+
+   For the real Aug 1 2026 event (`early_bird_deadline = 29 Jul`, set by
+   migration `summer_2026_food_flag_and_early_bird`) that is a genuine one-day
+   window: on 29 Jul after 06:00 the bot displays 4600 and the intent freezes
+   4100. Verified, and pinned as a characterisation test in
+   `tests/test_website_remote_pricing.py::TestEarlyBirdWindow`.
+
+   Until the canonical cutoff is chosen, `_assert_matches_quoted_price` refuses
+   to freeze any snapshot whose total differs from the amount the registration
+   was quoted (`discounted_payment_amount`). Nobody is charged a price they
+   were not shown; the row is left `snapshot_re_registration_required` for an
+   admin instead. Rows that never quoted anything (admin-created, legacy) are
+   exempt — there is no promise to contradict.
+6. **Payment confirmation ≠ attendance.** Mock and bot never set check-in.

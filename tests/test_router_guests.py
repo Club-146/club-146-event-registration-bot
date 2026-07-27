@@ -31,6 +31,9 @@ def mock_app():
     app.get_event_for_registration = AsyncMock(return_value=None)
     app.calculate_event_payment = MagicMock(return_value=(3000, 0, 3000, 3000))
     app.calculate_guest_price = MagicMock(return_value=(3000, 3000))
+    app.parse_graduation_year_and_class_letter = MagicMock(
+        return_value=(2010, "А", None)
+    )
     return app
 
 
@@ -70,9 +73,11 @@ def base_event():
 async def test_edit_guests_add_new(
     mock_message, mock_state, mock_app, base_reg, base_event
 ):
-    """_edit_guests adds new guests when user selects count and provides names."""
+    """_edit_guests adds new guests when user selects count and provides names + year."""
     mock_name_resp = MagicMock()
     mock_name_resp.text = "Иван Иванов"
+    mock_year_resp = MagicMock()
+    mock_year_resp.text = "2010А"
 
     with (
         patch("src.router.ask_user_choice", new_callable=AsyncMock, return_value="2"),
@@ -80,7 +85,12 @@ async def test_edit_guests_add_new(
         patch(
             "src.user_interactions.ask_user_raw",
             new_callable=AsyncMock,
-            return_value=mock_name_resp,
+            side_effect=[
+                mock_name_resp,
+                mock_year_resp,
+                mock_name_resp,
+                mock_year_resp,
+            ],
         ),
     ):
         from src.router import _edit_guests
@@ -92,6 +102,8 @@ async def test_edit_guests_add_new(
     assert len(saved_guests) == 2
     assert all(g["name"] == "Иван Иванов" for g in saved_guests)
     assert all(g["price"] == 3000 for g in saved_guests)
+    assert all(g["graduation_year"] == 2010 for g in saved_guests)
+    assert all(g["class_letter"] == "А" for g in saved_guests)
 
     mock_app.save_event_log.assert_awaited_once()
     log_data = mock_app.save_event_log.call_args[0][1]
@@ -135,16 +147,28 @@ async def test_edit_guests_update_existing(
     mock_message, mock_state, mock_app, base_reg, base_event
 ):
     """_edit_guests shows hints for existing names and saves updated list."""
-    base_reg["guests"] = [{"name": "Старый Гость", "price": 2000}]
+    base_reg["guests"] = [
+        {
+            "name": "Старый Гость",
+            "price": 2000,
+            "graduation_year": 2005,
+            "class_letter": "Б",
+        }
+    ]
 
     new_name_resp = MagicMock()
     new_name_resp.text = "Новый Гость"
+    new_year_resp = MagicMock()
+    new_year_resp.text = "2012В"
 
     ask_raw_calls = []
+    responses = iter([new_name_resp, new_year_resp])
 
     async def _capture_ask_raw(chat_id, text, state, timeout=None):
         ask_raw_calls.append(text)
-        return new_name_resp
+        return next(responses)
+
+    mock_app.parse_graduation_year_and_class_letter.return_value = (2012, "В", None)
 
     with (
         patch("src.router.ask_user_choice", new_callable=AsyncMock, return_value="1"),
@@ -161,6 +185,7 @@ async def test_edit_guests_update_existing(
     saved_guests = mock_app.save_registration_guests.call_args[0][2]
     assert len(saved_guests) == 1
     assert saved_guests[0]["name"] == "Новый Гость"
+    assert saved_guests[0]["graduation_year"] == 2012
 
 
 # --- Test 4: _edit_guests calculates guest prices with early bird discount ---
@@ -170,16 +195,17 @@ async def test_edit_guests_update_existing(
 async def test_edit_guests_early_bird_price(
     mock_message, mock_state, mock_app, base_reg, base_event
 ):
-    """Guest price reflects early bird discount via calculate_guest_price."""
+    """Guest price reflects early bird discount via calculate_guest_price(year)."""
     base_event["early_bird_discount"] = 500
     base_event["early_bird_deadline"] = datetime.now() + timedelta(days=7)
 
-    # Simulate discounted prices from src methods
-    mock_app.calculate_event_payment.return_value = (3000, 500, 2500, 3000)
     mock_app.calculate_guest_price.return_value = (3000, 2500)
+    mock_app.parse_graduation_year_and_class_letter.return_value = (2012, "А", None)
 
     name_resp = MagicMock()
     name_resp.text = "Гость Один"
+    year_resp = MagicMock()
+    year_resp.text = "2012А"
 
     with (
         patch("src.router.ask_user_choice", new_callable=AsyncMock, return_value="1"),
@@ -187,27 +213,25 @@ async def test_edit_guests_early_bird_price(
         patch(
             "src.user_interactions.ask_user_raw",
             new_callable=AsyncMock,
-            return_value=name_resp,
+            side_effect=[name_resp, year_resp],
         ),
     ):
         from src.router import _edit_guests
 
         await _edit_guests(mock_message, mock_state, base_reg, base_event, mock_app)
 
-    # Verify calculate_guest_price was called with reg_amount (regular, not discounted)
-    mock_app.calculate_event_payment.assert_called_once_with(
-        base_event, 2010, "GRADUATE"
-    )
-    mock_app.calculate_guest_price.assert_called_once_with(base_event, 3000)
+    mock_app.calculate_guest_price.assert_called_once_with(base_event, 2012, "GRADUATE")
 
     saved_guests = mock_app.save_registration_guests.call_args[0][2]
     assert saved_guests[0]["price"] == 3000
     assert saved_guests[0]["price_discounted"] == 2500
+    assert saved_guests[0]["graduation_year"] == 2012
 
-    # Verify summary mentions both prices
+    # Verify summary mentions both prices and year
     summary_text = mock_send.call_args_list[-1][0][1]
     assert "3000₽" in summary_text
     assert "2500₽" in summary_text
+    assert "2012А" in summary_text
 
 
 # --- Test 5: manage_registrations displays guest info ---
