@@ -137,36 +137,14 @@ def _format_event_summary(event: dict, reg_count: int = 0) -> str:
     return "\n".join(lines)
 
 
-MONTH_NAMES_RU = {
-    1: "Января",
-    2: "Февраля",
-    3: "Марта",
-    4: "Апреля",
-    5: "Мая",
-    6: "Июня",
-    7: "Июля",
-    8: "Августа",
-    9: "Сентября",
-    10: "Октября",
-    11: "Ноября",
-    12: "Декабря",
-}
-
-DAY_OF_WEEK_RU = {
-    0: "Пн",
-    1: "Вт",
-    2: "Ср",
-    3: "Чт",
-    4: "Пт",
-    5: "Сб",
-    6: "Вс",
-}
-
-
-def _make_date_display(dt: datetime) -> str:
-    day_name = DAY_OF_WEEK_RU.get(dt.weekday(), "")
-    month_name = MONTH_NAMES_RU.get(dt.month, "")
-    return f"{dt.day} {month_name}, {day_name}"
+# Moved to src/date_display.py so the website-event overlay can render dates the
+# same way without importing the routers package. Re-exported here because this
+# is where every existing caller (and test) looks for them.
+from src.date_display import (  # noqa: E402,F401
+    DAY_OF_WEEK_RU,
+    MONTH_NAMES_RU,
+    make_date_display as _make_date_display,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1064,6 +1042,39 @@ async def _handle_edit_message_templates(
     await send_safe(chat_id, f"✅ «{spec.title}» обновлён.")
 
 
+# Fields the website owns once an event is linked to it. Editing these in the
+# bot is precisely what caused the 28.07.2026 divergence: an admin changed the
+# venue here, nobody changed it on the site, and the two systems advertised
+# different addresses for the same party. The bot now READS these from the
+# website, so an edit here would be silently discarded on the next read — which
+# is worse than the old behaviour, because the admin would believe it worked.
+#
+# Time is deliberately NOT in this set: `time_display` is free text the operators
+# write themselves ("18:00-00:00"), and the overlay only fills it when Mongo has
+# none, so it stays genuinely bot-owned.
+WEBSITE_OWNED_EDIT_FIELDS = {
+    "name": "Название",
+    "date": "Дата",
+    "venue": "Место",
+    "address": "Адрес",
+}
+
+
+def website_owns_event_calendar(app: App, event: dict) -> bool:
+    """True when this event's calendar fields come from the website."""
+    from src.website_db import website_db_requested
+
+    uid = event.get("website_event_uid")
+    return bool(isinstance(uid, str) and uid.strip()) and website_db_requested(
+        app.settings
+    )
+
+
+def _site_events_admin_url(app: App) -> str:
+    base = (getattr(app.settings, "payment_site_base_url", "") or "").rstrip("/")
+    return f"{base}/admin/events" if base else "админку сайта"
+
+
 async def _handle_edit_event(
     chat_id: int,
     state: FSMContext,
@@ -1073,28 +1084,52 @@ async def _handle_edit_event(
     user_id: int,
     username: str | None,
 ) -> None:
+    site_owned = website_owns_event_calendar(app, event)
+
+    choices = {
+        "name": "Название",
+        "date": "Дата",
+        "time": "Время",
+        "venue": "Место",
+        "address": "Адрес",
+        "image": "Изображение",
+        "pricing": "Настройки оплаты",
+        "early_bird": "Ранняя регистрация",
+        "ask_bring_food": "Еда при поздней оплате",
+        "guests": "Настройки гостей",
+        "templates": "Тексты сообщений",
+        "back": "Назад",
+    }
+    prompt = "Что изменить?"
+    if site_owned:
+        # Hide rather than offer-and-refuse: an option that always fails is just
+        # a worse error message.
+        for key in WEBSITE_OWNED_EDIT_FIELDS:
+            choices.pop(key, None)
+        prompt = (
+            "Что изменить?\n\n"
+            "ℹ️ Название, дату и место этого события задаёт сайт — "
+            f"меняйте их в {_site_events_admin_url(app)}. "
+            "Бот читает их оттуда, поэтому правка здесь всё равно бы потерялась."
+        )
+
     field = await ask_user_choice(
         chat_id,
-        "Что изменить?",
-        choices={
-            "name": "Название",
-            "date": "Дата",
-            "time": "Время",
-            "venue": "Место",
-            "address": "Адрес",
-            "image": "Изображение",
-            "pricing": "Настройки оплаты",
-            "early_bird": "Ранняя регистрация",
-            "ask_bring_food": "Еда при поздней оплате",
-            "guests": "Настройки гостей",
-            "templates": "Тексты сообщений",
-            "back": "Назад",
-        },
+        prompt,
+        choices=choices,
         state=state,
         timeout=None,
     )
 
     if field == "back":
+        return
+    # Defensive: a stale menu callback could still carry a site-owned field.
+    elif site_owned and field in WEBSITE_OWNED_EDIT_FIELDS:
+        await send_safe(
+            chat_id,
+            f"⚠️ «{WEBSITE_OWNED_EDIT_FIELDS[field]}» задаётся на сайте: "
+            f"{_site_events_admin_url(app)}",
+        )
         return
     elif field == "name":
         await _handle_edit_field_name(

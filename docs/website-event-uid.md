@@ -15,9 +15,36 @@ pointing at that value. Registrations (`registered_users`) keep referencing the
 bot's own `event_id`; their link to the website is transitive through the event
 document.
 
-Calendar-field sync (name, date, venue, url) is **one-way, website → bot**.
-Pricing, registration status, and the registrations themselves stay operational
-bot data.
+Calendar fields (name, date, venue, address) are **read from the website, not
+synced**. There is no copy in Mongo to go stale: `App` reads the website's row
+and overlays it onto an in-memory copy of the event document on every read (see
+`src/website_db.py`). Pricing, registration status, and the registrations
+themselves stay operational bot data.
+
+> **The bot connects to the website's PostgreSQL directly** — decided 28.07.2026
+> by Petr. Earlier notes in this repo said the opposite («a `DATABASE_URL`
+> appearing in this repo means wrong path»); that rule is superseded. Reads go
+> over SQL as the least-privilege `club146_bot_ro` role (SELECT on `events`,
+> `event_registration_configs`, `person_telegram_links` — and nothing else;
+> `people` and `donations` are deliberately ungranted). **Writes** —
+> intents, confirm, revoke — still go through the website's internal HTTP API,
+> which owns idempotency, validation and the audit log.
+>
+> Why read-through rather than a sync job: a sync job copies, a copy can be
+> stale, and the moment both sides can write it needs a conflict rule. On
+> 28.07.2026 the site advertised ул. Встречная while the bot told 46 registrants
+> ул. Самаркандская — two stores, two write paths, nothing reconciling them.
+> Holding no second copy removes the failure mode instead of monitoring it.
+
+Because the website is the owner, the bot's admin **no longer offers** название,
+дата, место or адрес for a linked event; it points at the site's admin instead.
+An edit there would be discarded on the next read, which is worse than the old
+divergence — the admin would believe it had worked.
+
+Reads fail **closed to Mongo**: if the database is unreachable the bot keeps
+serving the last known values and logs. That is the opposite of remote pricing,
+which has no fallback on purpose. Showing a slightly stale address during an
+outage beats showing a registrant an error; charging a stale price does not.
 
 ## Two steps, deliberately separate
 
