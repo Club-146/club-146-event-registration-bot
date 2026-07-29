@@ -216,14 +216,10 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# AI instruction files (generated)
-CLAUDE.md
-GEMINI.md
+# Local AI tool state (not shared)
 .cursorrules
-
-# AI instruction files (generated)
 .claude
 
-# AI instruction files (generated)
-AGENTS.md
+# Deprecated AI instruction copies — do not reintroduce
+GEMINI.md
 WARP.md
