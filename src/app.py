@@ -105,6 +105,19 @@ class AppSettings(BaseSettings):
     event_payments_api_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     event_payments_sync_interval_seconds: float = Field(default=15.0, ge=5, le=300)
 
+    # Read event calendar fields (name, date, venue, address) from the website's
+    # PostgreSQL instead of the Mongo document, making the website the single
+    # owner of where and when an event happens. Applies only to events that
+    # carry a website_event_uid.
+    #
+    # Unlike remote pricing, this DOES fall back to Mongo on failure: showing a
+    # slightly stale address while the database is unreachable beats showing a
+    # registrant an error, whereas charging a stale price does not.
+    website_db_enabled: bool = False
+    website_database_url: SecretStr = SecretStr("")
+    website_db_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    website_db_pool_size: int = Field(default=3, ge=1, le=20)
+
     delay_messages: bool = True
 
     class Config:
@@ -180,6 +193,7 @@ class App:
         self._export_debounce_task: asyncio.Task | None = None
         self._export_debounce_seconds = 30
         self._event_payment_sync_task: asyncio.Task | None = None
+        self._website_events = None
 
     async def startup(self):
         """Run startup tasks like fixing the database and initializing collections."""
@@ -226,6 +240,14 @@ class App:
                 await task
             except asyncio.CancelledError:
                 pass
+
+        reader = self._website_events
+        self._website_events = None
+        if reader is not None:
+            try:
+                await reader.close()
+            except Exception as exc:  # noqa: BLE001 — shutdown must not fail
+                logger.warning(f"website_db: pool close failed: {exc}")
 
     @property
     def collection(self):
@@ -527,6 +549,29 @@ class App:
 
     # ---- Event methods ----
 
+    @property
+    def website_events(self):
+        """Reader for the website's event rows (see src/website_db.py)."""
+        if self._website_events is None:
+            from src.website_db import WebsiteEventReader
+
+            self._website_events = WebsiteEventReader(self.settings)
+        return self._website_events
+
+    async def _resolve(self, event: Optional[Dict]) -> Optional[Dict]:
+        """Apply the website's calendar fields to one event.
+
+        Every event read goes through here, which is the point: the website owns
+        name/date/venue/address, and making that true at the single place events
+        are loaded means no caller has to remember it. Returns the Mongo
+        document unchanged when the feature is off, when the event has no
+        website_event_uid, or when the website cannot be reached.
+        """
+        return await self.website_events.resolve_event(event)
+
+    async def _resolve_many(self, events: List[Dict]) -> List[Dict]:
+        return [await self._resolve(event) for event in events]
+
     async def get_active_events(self) -> List[Dict]:
         """Get all events that are upcoming or have open registration."""
         cursor = self.events_col.find(
@@ -534,7 +579,7 @@ class App:
                 "status": {"$in": ["upcoming", "registration_closed"]},
             }
         ).sort("date", 1)
-        return await cursor.to_list(length=None)
+        return await self._resolve_many(await cursor.to_list(length=None))
 
     async def get_enabled_events(self) -> List[Dict]:
         """Get all events that are enabled for registration (upcoming + enabled)."""
@@ -544,27 +589,30 @@ class App:
                 "enabled": True,
             }
         ).sort("date", 1)
-        return await cursor.to_list(length=None)
+        return await self._resolve_many(await cursor.to_list(length=None))
 
     async def get_event_by_id(self, event_id: str) -> Optional[Dict]:
         """Get a single event by its MongoDB _id."""
         from bson import ObjectId
 
         try:
-            return await self.events_col.find_one({"_id": ObjectId(event_id)})
+            event = await self.events_col.find_one({"_id": ObjectId(event_id)})
         except Exception:
             return None
+        return await self._resolve(event)
 
     async def get_event_by_city_and_date(
         self, city: str, date: datetime
     ) -> Optional[Dict]:
         """Find an event matching city and date."""
-        return await self.events_col.find_one({"city": city, "date": date})
+        return await self._resolve(
+            await self.events_col.find_one({"city": city, "date": date})
+        )
 
     async def get_all_events(self) -> List[Dict]:
         """Get all events (for admin)."""
         cursor = self.events_col.find().sort("date", -1)
-        return await cursor.to_list(length=None)
+        return await self._resolve_many(await cursor.to_list(length=None))
 
     async def create_event(self, event_data: Dict) -> str:
         """Create a new event. Returns the inserted _id as string."""
@@ -601,7 +649,7 @@ class App:
         event = await self.events_col.find_one(
             {"$or": [{"city": target_city}, {"name": {"$regex": target_city}}]}
         )
-        return event
+        return await self._resolve(event)
 
     async def get_registration_count_for_event(self, event_id: str) -> int:
         """Count registrations for a specific event."""

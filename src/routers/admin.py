@@ -23,6 +23,7 @@ from src.website_event_bridge import (
 )
 from botspot import commands_menu
 from botspot.components.qol.bot_commands_menu import Visibility
+from src.amount_parse import message_text, parse_rubles_amount
 from src.user_interactions import ask_user_choice, ask_user_raw
 from botspot.utils import send_safe
 from botspot.utils.admin_filter import AdminFilter
@@ -247,10 +248,11 @@ async def _resolve_manual_user(
         state=state,
         timeout=300,
     )
-    if not username_input:
+    username_raw = message_text(username_input)
+    if not username_raw:
         await send_safe(chat_id, "Время ожидания истекло.")
         return None
-    username_clean = str(username_input).lstrip("@").strip()
+    username_clean = username_raw.lstrip("@").strip()
     reg = await app.collection.find_one(
         {"username": username_clean, "event_id": event_id}
     )
@@ -273,15 +275,16 @@ async def _confirm_payment_amount(
         state=state,
         timeout=300,
     )
-    if not amount_input:
+    amount_raw = message_text(amount_input)
+    if amount_raw is None:
         await send_safe(chat_id, "Время ожидания истекло.")
         return None
 
-    try:
-        return int(str(amount_input).strip())
-    except ValueError:
+    amount = parse_rubles_amount(amount_raw)
+    if amount is None:
         await send_safe(chat_id, "Неверный формат суммы.")
         return None
+    return amount
 
 
 async def _send_admin_confirmed_ticket(

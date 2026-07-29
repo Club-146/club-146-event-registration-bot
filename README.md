@@ -82,6 +82,18 @@ Build and run with Docker:
 docker-compose up --build
 ```
 
+## Deploy
+
+**Prod does not auto-deploy — merging to `main` ships nothing.** You must deploy:
+
+```bash
+make release-prod   # push dev → PR → merge main → deploy
+make deploy-prod    # deploy only (Coolify prod)
+```
+
+Why, how to verify a deploy actually landed, and the permanent fix:
+[docs/DEPLOY.md](docs/DEPLOY.md).
+
 ## License
 
 This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.

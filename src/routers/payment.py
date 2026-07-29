@@ -19,6 +19,7 @@ from src.app import App, GraduateType
 from src.router import is_admin, commands_menu, get_event_date_display
 from src.routers.admin import PaymentInfo
 from src.ticket_cards import send_paid_ticket_card
+from src.amount_parse import message_text, parse_rubles_amount
 from src.user_interactions import ask_user_raw, ask_user_choice, ask_user_choice_raw
 from src.website_event_bridge import (
     WebsiteBridgeError,
@@ -1472,24 +1473,25 @@ async def _resolve_payment_amount(
             state=state,
             timeout=300,
         )
-        if amount_response is None or amount_response.text is None:
+        amount_raw = message_text(amount_response)
+        if amount_raw is None:
             await send_safe(chat_id, "Время ожидания истекло. Операция отменена.")
             logger.warning(f"Payment amount input timeout for user in city {city}")
             return None
-        try:
-            return int(amount_response.text)
-        except ValueError:
+        amount = parse_rubles_amount(amount_raw)
+        if amount is None:
             await send_safe(
                 chat_id,
                 "Некорректная сумма платежа. Пожалуйста, используйте команду снова.",
             )
             return None
+        return amount
     else:
-        try:
-            return int(amount_str)
-        except ValueError:
+        amount = parse_rubles_amount(amount_str)
+        if amount is None:
             await callback_query.answer("Invalid amount in callback data")
             return None
+        return amount
 
 
 def _build_payment_status_text(

@@ -1,4 +1,4 @@
-.PHONY: check fix fix-unsafe help run run-debug test mock-website-api release-prod
+.PHONY: check fix fix-unsafe help run run-debug test mock-website-api release-prod deploy-prod deploy-dev
 
 run:
 	uv run python run.py
@@ -29,7 +29,8 @@ fix-unsafe:
 test:
 	uv run pytest tests/ --cov=src --cov-report=term --cov-fail-under=40
 
-# Prod: push dev → PR to main → merge (Coolify auto-deploys). See docs/DEPLOY.md
+# Prod: push dev → PR to main → merge → deploy-prod. See docs/DEPLOY.md
+# Merging to main does NOT deploy on its own — the last step is what ships.
 release-prod:
 	@test "$$(git branch --show-current)" = "dev" || (echo "must be on branch dev"; exit 1)
 	@test -z "$$(git status --porcelain)" || (echo "working tree dirty — commit first"; exit 1)
@@ -45,7 +46,24 @@ release-prod:
 	echo "Merging PR #$$pr …"; \
 	gh pr merge "$$pr" --merge --delete-branch=false
 	@git fetch origin main
-	@echo "OK: main updated. Coolify prod should redeploy from main."
+	@echo "main updated — now deploying (prod does not auto-deploy)…"
+	@$(MAKE) --no-print-directory deploy-prod
+
+# Coolify deploys on new-c.calmmage.com (Petr's personal Hetzner box).
+#
+# Prod does NOT auto-deploy. The prod app is bound to the `calmmage` GitHub App
+# (source_id=2) instead of `Club-146` (source_id=4), so GitHub never delivers a
+# push webhook for this repo to it. On 28 Jul 2026 that left prod 12 days behind
+# `main`, still running the pre-timezone-fix scheduler and blasting every unpaid
+# user at 03:15 MSK. Merging to `main` changes nothing on the server until this
+# runs. Dev is on source_id=4 and does auto-deploy on push to `dev`.
+#
+# Force rebuild: make deploy-prod FORCE=1
+deploy-prod:
+	@./scripts/coolify-deploy.sh prod
+
+deploy-dev:
+	@./scripts/coolify-deploy.sh dev
 
 help:
 	@echo "Available targets:"
@@ -54,5 +72,7 @@ help:
 	@echo "  fix-unsafe        - Auto-fix with unsafe fixes enabled"
 	@echo "  test              - Run tests with coverage"
 	@echo "  mock-website-api  - Local mock of website event-payment internal API"
-	@echo "  release-prod      - push dev → PR → merge to main (Coolify prod)"
+	@echo "  release-prod      - push dev → PR → merge to main → deploy-prod"
+	@echo "  deploy-prod       - Coolify prod redeploy (REQUIRED: main does not auto-deploy)"
+	@echo "  deploy-dev        - Coolify dev redeploy (dev auto-deploys; this is a manual kick)"
 	@echo "  help              - Show this help message"
