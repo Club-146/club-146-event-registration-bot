@@ -205,6 +205,7 @@ class TestMerge:
             _registration(),
             resolved,
             calculation_date=date(2026, 7, 20),
+            now=datetime(2026, 7, 20, 12),
         )
         # 1600 + 200*(2026-2010) - 500 early bird
         assert expected == 1600 + 3200 - 500
@@ -266,6 +267,7 @@ class TestQuotedPriceGuard:
             registration,
             event,
             calculation_date=date(2026, 7, 20),
+            now=datetime(2026, 7, 20, 12),
             client=client,
         )
 

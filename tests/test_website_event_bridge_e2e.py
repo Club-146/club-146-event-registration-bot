@@ -135,7 +135,11 @@ async def test_e2e_create_replay_confirm_revoke_over_http(mock_http):
     client = WebsiteEventBridgeClient(app.settings)
 
     await freeze_new_registration_snapshot(
-        app, registration, event, calculation_date=date(2026, 7, 20)
+        app,
+        registration,
+        event,
+        calculation_date=date(2026, 7, 20),
+        now=datetime(2026, 7, 20, 12),
     )
     # 1400 + 200*floor(10/3) - 500 = 1500 registrant + 1500 guest
     assert registration["website_event_bridge"]["expected_amount_rubles"] == 3000
@@ -185,7 +189,11 @@ async def test_e2e_provider_paid_sync_promotes_local_status(mock_http):
     client = WebsiteEventBridgeClient(app.settings)
 
     await freeze_new_registration_snapshot(
-        app, registration, event, calculation_date=date(2026, 7, 20)
+        app,
+        registration,
+        event,
+        calculation_date=date(2026, 7, 20),
+        now=datetime(2026, 7, 20, 12),
     )
     await create_or_replay_intent(app, registration, event, client=client)
     service.mark_provider_paid(REGISTRATION_ID)
@@ -219,7 +227,11 @@ async def test_e2e_background_sync_notifies_once(mock_http):
     app.collection.find = lambda *a, **k: Cursor()
 
     await freeze_new_registration_snapshot(
-        app, registration, event, calculation_date=date(2026, 7, 20)
+        app,
+        registration,
+        event,
+        calculation_date=date(2026, 7, 20),
+        now=datetime(2026, 7, 20, 12),
     )
     await create_or_replay_intent(app, registration, event, client=client)
     service.mark_provider_paid(REGISTRATION_ID)
@@ -259,7 +271,11 @@ async def test_e2e_zero_price_guest_rejected_by_mock(mock_http):
 
     with pytest.raises(Exception) as exc:
         await freeze_new_registration_snapshot(
-            app, registration, event, calculation_date=date(2026, 7, 20)
+            app,
+            registration,
+            event,
+            calculation_date=date(2026, 7, 20),
+            now=datetime(2026, 7, 20, 12),
         )
     assert "invalid_guest_price" in str(exc.value)
 
@@ -276,7 +292,11 @@ async def test_e2e_manual_admin_registration_shape_freezes(mock_http):
     client = WebsiteEventBridgeClient(app.settings)
 
     await freeze_new_registration_snapshot(
-        app, registration, event, calculation_date=date(2026, 7, 20)
+        app,
+        registration,
+        event,
+        calculation_date=date(2026, 7, 20),
+        now=datetime(2026, 7, 20, 12),
     )
     response = await create_or_replay_intent(app, registration, event, client=client)
     assert response["status"] == "pending"
