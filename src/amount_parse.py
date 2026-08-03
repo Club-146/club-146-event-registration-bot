@@ -99,7 +99,11 @@ def _normalize_decimal_separators(text: str) -> Optional[str]:
         if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
             # decimal: 1900.00
             return text if _is_float_literal(text) else None
-        if len(parts) >= 2 and all(len(p) == 3 for p in parts[1:]) and parts[0].isdigit():
+        if (
+            len(parts) >= 2
+            and all(len(p) == 3 for p in parts[1:])
+            and parts[0].isdigit()
+        ):
             # thousand separators: 1.900 or 1.900.000
             text = "".join(parts)
             return text if text.isdigit() else None
