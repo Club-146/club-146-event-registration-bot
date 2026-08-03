@@ -131,7 +131,11 @@ class FakeClient:
 
 def test_payload_freezes_formula_total_guests_and_legal_kind():
     payload, total = build_new_intent_payload(
-        _settings(), _registration(), _event(), calculation_date=date(2026, 7, 20)
+        _settings(),
+        _registration(),
+        _event(),
+        calculation_date=date(2026, 7, 20),
+        now=datetime(2026, 7, 20, 12),
     )
 
     # 1400 + 200 * floor((2026 - 2016) / 3) - 500 = 1500,
@@ -167,7 +171,11 @@ async def test_replay_uses_persisted_snapshot_not_mutated_event():
     client = FakeClient()
 
     await freeze_new_registration_snapshot(
-        app, registration, event, calculation_date=date(2026, 7, 20)
+        app,
+        registration,
+        event,
+        calculation_date=date(2026, 7, 20),
+        now=datetime(2026, 7, 20, 12),
     )
     frozen = registration["website_event_bridge"]["intent_payload"]
     event["price_formula_base"] = 999_999
@@ -190,7 +198,11 @@ async def test_confirm_reuses_first_durable_evidence_and_stores_codes():
     event = _event()
     client = FakeClient()
     await freeze_new_registration_snapshot(
-        app, registration, event, calculation_date=date(2026, 7, 20)
+        app,
+        registration,
+        event,
+        calculation_date=date(2026, 7, 20),
+        now=datetime(2026, 7, 20, 12),
     )
 
     await confirm_registration_payment(
@@ -351,7 +363,11 @@ async def test_replay_sync_promotes_only_authoritative_paid_status():
     event = _event()
     client = FakeClient()
     await freeze_new_registration_snapshot(
-        app, registration, event, calculation_date=date(2026, 7, 20)
+        app,
+        registration,
+        event,
+        calculation_date=date(2026, 7, 20),
+        now=datetime(2026, 7, 20, 12),
     )
     app.collection.update_one.reset_mock()
 
@@ -451,6 +467,7 @@ async def test_payment_receipt_flow_keeps_full_group_totals():
             return_value=(registration, event),
         ),
         patch("src.routers.payment.bridge_enabled_for", return_value=False),
+        patch("src.payment_timeline.is_early_bird_active", return_value=True),
         patch(
             "src.routers.payment._send_payment_info_messages",
             new_callable=AsyncMock,
@@ -492,7 +509,11 @@ async def test_background_sync_pushes_provider_confirmation_exactly_once():
     app.collection.find = MagicMock(return_value=Cursor())
     client = FakeClient()
     await freeze_new_registration_snapshot(
-        app, registration, event, calculation_date=date(2026, 7, 20)
+        app,
+        registration,
+        event,
+        calculation_date=date(2026, 7, 20),
+        now=datetime(2026, 7, 20, 12),
     )
     client.create_response = _remote_response(status="paid", tickets=True)
 

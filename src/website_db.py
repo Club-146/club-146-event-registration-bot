@@ -119,24 +119,22 @@ class WebsiteEventReader:
         self._cache: dict[str, tuple[float, Optional[dict]]] = {}
 
     def enabled(self) -> bool:
-        return website_db_requested(self.settings) and bool(
-            self._dsn()
-        )
+        return website_db_requested(self.settings) and bool(self._dsn())
 
     def _dsn(self) -> str:
         raw = getattr(self.settings, "website_database_url", None)
         if raw is None:
             return ""
         # SecretStr or plain str, depending on how it was configured.
-        return _clean(raw.get_secret_value() if hasattr(raw, "get_secret_value") else raw)
+        return _clean(
+            raw.get_secret_value() if hasattr(raw, "get_secret_value") else raw
+        )
 
     async def _get_pool(self):
         if self._pool is None:
             import asyncpg  # imported lazily so the bot runs without the driver
 
-            timeout = float(
-                getattr(self.settings, "website_db_timeout_seconds", 5.0)
-            )
+            timeout = float(getattr(self.settings, "website_db_timeout_seconds", 5.0))
             self._pool = await asyncpg.create_pool(
                 self._dsn(),
                 min_size=1,
