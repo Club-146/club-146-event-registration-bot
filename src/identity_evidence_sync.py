@@ -53,8 +53,11 @@ def _item(registration: dict, event_names: dict[str, str], *, active: bool):
     if isinstance(year, bool) or not isinstance(year, int) or not 1900 <= year <= 2100:
         year = None
     telegram_id = registration.get("user_id")
-    if (isinstance(telegram_id, bool) or not isinstance(telegram_id, int)
-            or telegram_id < 1):
+    if (
+        isinstance(telegram_id, bool)
+        or not isinstance(telegram_id, int)
+        or telegram_id < 1
+    ):
         telegram_id = None
     event_id = _clean(registration.get("event_id"), 120)
     return IdentityEvidenceItem(
@@ -105,10 +108,10 @@ async def sync_identity_evidence_once(
     api = client or WebsiteEventBridgeClient(app.settings)
     synced = 0
     for start in range(0, len(items), 500):
-        batch = items[start:start + 500]
-        response = await api.sync_identity_evidence([
-            item.model_dump(mode="json") for item in batch
-        ])
+        batch = items[start : start + 500]
+        response = await api.sync_identity_evidence(
+            [item.model_dump(mode="json") for item in batch]
+        )
         if response.get("total") != len(batch):
             raise WebsiteBridgeError("identity_sync_count_mismatch")
         synced += len(batch)
@@ -126,4 +129,3 @@ async def run_identity_evidence_sync_loop(app: Any) -> None:
         except Exception:
             logger.exception("Identity evidence sync failed unexpectedly")
         await asyncio.sleep(interval)
-

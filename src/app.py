@@ -109,7 +109,8 @@ class AppSettings(BaseSettings):
     # uses the same internal API base URL + bearer token.
     identity_evidence_sync_enabled: bool = False
     identity_evidence_sync_interval_seconds: float = Field(
-        default=900.0, ge=60, le=86400)
+        default=900.0, ge=60, le=86400
+    )
 
     # Read event calendar fields (name, date, venue, address) from the website's
     # PostgreSQL instead of the Mongo document, making the website the single
@@ -242,8 +243,10 @@ class App:
             run_identity_evidence_sync_loop,
         )
 
-        if (identity_evidence_sync_requested(self.settings)
-                and self._identity_evidence_sync_task is None):
+        if (
+            identity_evidence_sync_requested(self.settings)
+            and self._identity_evidence_sync_task is None
+        ):
             self._identity_evidence_sync_task = asyncio.create_task(
                 run_identity_evidence_sync_loop(self),
                 name="identity-evidence-sync",

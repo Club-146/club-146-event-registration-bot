@@ -699,7 +699,8 @@ class WebsiteEventBridgeClient:
     async def sync_identity_evidence(self, items: list[dict]) -> dict:
         """Store display-only registration evidence; never creates TG links."""
         return await self._post(
-            "/api/internal/identity-evidence/batch", {"items": items})
+            "/api/internal/identity-evidence/batch", {"items": items}
+        )
 
     async def get_event_config(self, bot_event_id: str) -> dict:
         """Read this bot event's pricing config from the website."""
