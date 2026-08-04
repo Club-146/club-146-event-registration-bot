@@ -76,6 +76,23 @@ Re-deploying is safe against double-sends: delivery sets per-registration flags
 (`payment_reminder_d4_sent` / `_d2_sent`), and those flag names are unchanged
 across versions, so already-notified users are skipped on the next tick.
 
+## MongoDB — no manual migration step
+
+Prod state lives in **MongoDB** (`register-146-meetup-2025-bot`), not in the
+website's Postgres. Moving it to Postgres is a separate project and is not part
+of any website release.
+
+Schema migrations are in-repo and automatic: `src/migrations.py` runs on every
+startup (`src/app.py` → `run_migrations`), applies whatever is not yet recorded
+in the `migrations` collection, and skips the rest. A redeploy migrates itself;
+there is nothing to run by hand. A migration that raises aborts startup instead
+of leaving the DB half-applied — so a deploy that "came up clean" also means
+migrations are current.
+
+The website's Postgres is only ever **read** by the bot, and only when
+`WEBSITE_DATABASE_URL` is set (`src/website_db.py`); it is never migrated from
+here.
+
 ## Credentials
 
 `scripts/coolify-deploy.sh` takes the token from `$COOLIFY_NEW_TOKEN` (exported
