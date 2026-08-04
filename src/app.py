@@ -104,6 +104,12 @@ class AppSettings(BaseSettings):
     event_payments_remote_pricing_enabled: bool = False
     event_payments_api_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     event_payments_sync_interval_seconds: float = Field(default=15.0, ge=5, le=300)
+    # Copy display-only registration evidence (name/year/@username/event) to
+    # the website verification UI. Independent from checkout/ticket flags and
+    # uses the same internal API base URL + bearer token.
+    identity_evidence_sync_enabled: bool = False
+    identity_evidence_sync_interval_seconds: float = Field(
+        default=900.0, ge=60, le=86400)
 
     # Read event calendar fields (name, date, venue, address) from the website's
     # PostgreSQL instead of the Mongo document, making the website the single
@@ -193,6 +199,7 @@ class App:
         self._export_debounce_task: asyncio.Task | None = None
         self._export_debounce_seconds = 30
         self._event_payment_sync_task: asyncio.Task | None = None
+        self._identity_evidence_sync_task: asyncio.Task | None = None
         self._website_events = None
 
     async def startup(self):
@@ -230,16 +237,30 @@ class App:
                 run_payment_sync_loop(self), name="event-payment-sync"
             )
 
+        from src.identity_evidence_sync import (
+            identity_evidence_sync_requested,
+            run_identity_evidence_sync_loop,
+        )
+
+        if (identity_evidence_sync_requested(self.settings)
+                and self._identity_evidence_sync_task is None):
+            self._identity_evidence_sync_task = asyncio.create_task(
+                run_identity_evidence_sync_loop(self),
+                name="identity-evidence-sync",
+            )
+
     async def shutdown(self):
         """Stop background bridge work without delaying bot shutdown."""
-        task = self._event_payment_sync_task
+        tasks = [self._event_payment_sync_task, self._identity_evidence_sync_task]
         self._event_payment_sync_task = None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        self._identity_evidence_sync_task = None
+        for task in tasks:
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         reader = self._website_events
         self._website_events = None
