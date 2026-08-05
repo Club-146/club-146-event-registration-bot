@@ -75,7 +75,6 @@ jobs:
   complexity:
     name: Complexity (advisory)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -91,4 +90,5 @@ jobs:
         run: uv sync --all-groups
 
       - name: Run Lizard complexity check
+        continue-on-error: true
         run: uv run lizard -l python --CCN 15 -w src
