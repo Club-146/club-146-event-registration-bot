@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.routers.admin import (
     admin_handler,
+    admin_payment_audit,
     admin_register_payment,
 )
 
@@ -101,7 +102,51 @@ async def test_admin_handler_view_stats(
         mock_stats.assert_called_once_with(mock_message, app=mock_app)
 
         # Verify result is the chosen option
-        assert result == "view_stats"
+    assert result == "view_stats"
+
+
+@pytest.mark.asyncio
+async def test_payment_audit_repairs_admin_recipient_mismatch(
+    mock_message, mock_state, mock_app, mock_send_safe
+):
+    event = _make_event()
+    event_id = str(event["_id"])
+    registration = {
+        "_id": ObjectId(),
+        "event_id": event_id,
+        "user_id": 111,
+        "username": "nikitin",
+        "full_name": "Иван Никитин",
+        "payment_status": "confirmed",
+        "payment_method": "on_site",
+        "payment_screenshot_id": 123,
+        "payment_proof_analysis": {
+            "destination": "event_admin",
+            "receipt_status": "succeeded",
+        },
+    }
+    mock_app.get_all_events.return_value = [event]
+    mock_app.get_all_users.return_value = [registration]
+    mock_app.settings.event_payments_bridge_enabled = False
+    mock_app.collection.update_one.return_value = MagicMock(modified_count=1)
+
+    with patch(
+        "src.routers.admin.ask_user_choice",
+        new_callable=AsyncMock,
+        return_value=event_id,
+    ):
+        await admin_payment_audit(mock_message, mock_state, mock_app)
+
+    update = mock_app.collection.update_one.await_args.args[1]["$set"]
+    assert update["payment_method"] == "to_admin"
+    assert update["payment_method_source"] == "admin_proof_audit"
+    correction = mock_app.save_event_log.await_args.args
+    assert correction[0] == "payment_correction"
+    assert correction[1]["previous_method"] == "on_site"
+    assert correction[1]["new_method"] == "to_admin"
+    report = mock_send_safe.await_args.args[1]
+    assert "Автоисправлено сейчас: 1" in report
+    assert "требует внимания: 0" in report
 
 
 # TODO: Fix src import path issue

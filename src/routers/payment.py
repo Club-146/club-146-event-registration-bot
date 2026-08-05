@@ -16,8 +16,15 @@ from aiogram.types import (
 from loguru import logger
 from src import templates
 from src.app import App, GraduateType
+from src.payment_proof_analysis import (
+    PaymentDestination,
+    PaymentInfo,
+    configured_payment_recipients,
+    extract_payment_from_image,
+    proof_analysis_payload,
+    resolve_payment_method,
+)
 from src.router import is_admin, commands_menu, get_event_date_display
-from src.routers.admin import PaymentInfo
 from src.ticket_cards import send_paid_ticket_card
 from src.amount_parse import message_text, parse_rubles_amount
 from src.user_interactions import ask_user_raw, ask_user_choice, ask_user_choice_raw
@@ -579,9 +586,9 @@ async def _handle_paid_await_proof(
 ) -> bool:
     """User said they already paid (site or Maria) — ask for screenshot/PDF proof.
 
-    payment_method: "on_site" | "to_maria" (matches choice keys paid_on_site / paid_to_maria).
+    payment_method: "on_site" | "to_admin" (choice keys stay user-facing).
     """
-    method_label = "сайт" if payment_method == "on_site" else "Маша"
+    method_label = "сайт" if payment_method == "on_site" else "администратор"
     await app.log_registration_step(
         user_id=user_id,
         username=username,
@@ -646,14 +653,18 @@ async def _handle_paid_await_proof(
 
 
 def _payment_method_label(method: str | None, *, source: str | None = None) -> str:
-    if method == "to_maria":
-        base = "Маше (перевод)"
+    if method in {"to_admin", "to_maria"}:
+        base = "администратору (перевод)"
     elif method == "on_site":
         base = "сайт / карта"
     else:
         base = "неизвестно"
     if source == "ai":
         return f"{base} · AI"
+    if source == "proof_recipient":
+        return f"{base} · по получателю в чеке"
+    if source == "proof_merchant":
+        return f"{base} · по магазину в чеке"
     if source == "user":
         return f"{base} · выбрал(а)"
     return base
@@ -670,12 +681,23 @@ def _build_user_info_text(
     graduate_type: str,
     payment_method: str | None = None,
     payment_method_source: str | None = None,
+    claimed_payment_method: str | None = None,
+    payment_method_overridden: bool = False,
+    proof_destination: PaymentDestination = PaymentDestination.UNKNOWN,
     method_reason: str | None = None,
 ) -> str:
     user_info = f"👤 Пользователь: {username or ''} (ID: {user_id})\n"
     user_info += f"📍 Город: {city}\n"
     if payment_method:
         user_info += f"📍 Куда: {_payment_method_label(payment_method, source=payment_method_source)}\n"
+        if claimed_payment_method:
+            user_info += (
+                f"🗣 Заявил(а): {_payment_method_label(claimed_payment_method)}\n"
+            )
+        if payment_method_overridden:
+            user_info += "🔁 Автоисправлено по получателю в чеке\n"
+        elif proof_destination == PaymentDestination.UNKNOWN:
+            user_info += "⚠️ Получатель в чеке не распознан — способ оставлен по выбору пользователя\n"
         if method_reason:
             user_info += f"💬 {escape(method_reason)}\n"
     if guests:
@@ -798,8 +820,13 @@ async def _forward_proof_to_events_chat(
 ) -> tuple[str | None, str | None]:
     """Forward proof to events chat. Returns resolved (payment_method, source)."""
     logger.info(f"Starting payment proof forwarding for user {user_id}, city: {city}")
-    events_chat_id = app.settings.events_chat_id
-    logger.info(f"Events chat ID: {events_chat_id}")
+    configured_proof_chat_id = getattr(app.settings, "payment_proofs_chat_id", None)
+    proof_chat_id = (
+        configured_proof_chat_id
+        if isinstance(configured_proof_chat_id, int)
+        else app.settings.events_chat_id
+    )
+    logger.info(f"Payment proof review chat ID: {proof_chat_id}")
 
     # The amount arguments are full group totals so persistence and admin
     # confirmation can never drop named guests. Derive registrant-only values
@@ -838,16 +865,24 @@ async def _forward_proof_to_events_chat(
     logger.info(
         f"Parsing payment info from response: has_photo={has_photo}, has_pdf={has_pdf}"
     )
-    payment_info = await parse_payment_info(response, has_photo, has_pdf, bot)
-
-    # Prefer explicit user choice; otherwise AI destination (Maria name/phone → to_maria).
-    method_reason = payment_info.method_reason
-    if payment_method in ("on_site", "to_maria"):
-        resolved_method = payment_method
-        resolved_source = payment_method_source or "user"
-    else:
-        resolved_method = payment_info.payment_method
-        resolved_source = "ai"
+    event = await app.get_event_by_id(event_id)
+    payment_info = await parse_payment_info(
+        response, has_photo, has_pdf, bot, event=event
+    )
+    resolution = resolve_payment_method(
+        payment_method, payment_method_source, payment_info
+    )
+    analysis = proof_analysis_payload(payment_info, resolution)
+    method_override = (
+        {
+            "from": resolution.claimed_method,
+            "to": resolution.effective_method,
+            "reason": resolution.override_reason,
+            "at": analysis["analyzed_at"],
+        }
+        if resolution.overridden
+        else None
+    )
 
     user_info = _build_user_info_text(
         user_id,
@@ -858,9 +893,12 @@ async def _forward_proof_to_events_chat(
         total_regular_with_guests,
         user_registration,
         graduate_type,
-        payment_method=resolved_method,
-        payment_method_source=resolved_source,
-        method_reason=method_reason if resolved_source == "ai" else None,
+        payment_method=resolution.effective_method,
+        payment_method_source=resolution.source,
+        claimed_payment_method=resolution.claimed_method,
+        payment_method_overridden=resolution.overridden,
+        proof_destination=payment_info.destination,
+        method_reason=payment_info.method_reason,
     )
 
     logger.info(
@@ -883,7 +921,7 @@ async def _forward_proof_to_events_chat(
         photo = response.photo[-1]
         logger.info(f"Sending photo with file_id: {photo.file_id}")
         forwarded_msg = await bot.send_photo(
-            chat_id=events_chat_id,
+            chat_id=proof_chat_id,
             photo=photo.file_id,
             caption=user_info,
             reply_markup=validation_markup,
@@ -897,7 +935,7 @@ async def _forward_proof_to_events_chat(
         )
         logger.info(f"Sending PDF with file_id: {response.document.file_id}")
         forwarded_msg = await bot.send_document(
-            chat_id=events_chat_id,
+            chat_id=proof_chat_id,
             document=response.document.file_id,
             caption=user_info,
             reply_markup=validation_markup,
@@ -914,13 +952,31 @@ async def _forward_proof_to_events_chat(
         screenshot_message_id=forwarded_msg.message_id,
         formula_amount=formula_amount,
         payment_status="pending",
-        payment_method=resolved_method,
-        payment_method_source=resolved_source,
+        payment_method=resolution.effective_method,
+        payment_method_source=resolution.source,
+        payment_method_claimed=resolution.claimed_method,
+        payment_proof_analysis=analysis,
+        payment_method_override=method_override,
     )
+    if resolution.overridden:
+        await app.save_event_log(
+            "payment_correction",
+            {
+                "action": "payment_method_auto_corrected_from_receipt",
+                "event_id": event_id,
+                "previous_method": resolution.claimed_method,
+                "new_method": resolution.effective_method,
+                "proof_message_id": forwarded_msg.message_id,
+                "matched_admin": payment_info.matched_admin,
+                "reason": resolution.override_reason,
+            },
+            user_id,
+            username,
+        )
     logger.info(
         f"Payment proof from user {user_id} sent to validation chat with caption"
     )
-    return resolved_method, resolved_source
+    return resolution.effective_method, resolution.source
 
 
 async def _handle_screenshot_upload(
@@ -990,6 +1046,7 @@ async def _handle_screenshot_upload(
         payment_status="pending",
         payment_method=payment_method,
         payment_method_source=payment_method_source,
+        payment_method_claimed=payment_method,
     )
 
     try:
@@ -1203,7 +1260,7 @@ async def process_payment(
                 total_regular_with_guests,
                 total_formula_with_guests,
                 graduate_type,
-                payment_method="to_maria",
+                payment_method="to_admin",
             )
         if response == "pay_later":
             await _handle_pay_later(
@@ -1252,12 +1309,14 @@ async def process_payment(
 
 
 async def parse_payment_info(
-    response, has_photo: bool, has_pdf: bool, bot
+    response,
+    has_photo: bool,
+    has_pdf: bool,
+    bot,
+    *,
+    event: dict | None = None,
 ) -> PaymentInfo:
-    from src.routers.admin import extract_payment_from_image
-
-    recipient_name = app.settings.payment_name
-    recipient_phone = app.settings.payment_phone_number
+    recipients = configured_payment_recipients(app.settings, event)
     model = app.settings.payment_parse_model
 
     # Get the file
@@ -1268,8 +1327,7 @@ async def parse_payment_info(
         return await extract_payment_from_image(
             file_bytes.read(),
             "image/jpeg",
-            recipient_name=recipient_name,
-            recipient_phone=recipient_phone,
+            recipients=recipients,
             model=model,
         )
     elif has_pdf:
@@ -1280,12 +1338,11 @@ async def parse_payment_info(
         return await extract_payment_from_image(
             file_bytes.read(),
             "application/pdf",
-            recipient_name=recipient_name,
-            recipient_phone=recipient_phone,
+            recipients=recipients,
             model=model,
         )
     else:
-        return PaymentInfo(amount=None, is_valid=False, paid_to_maria=False)
+        return PaymentInfo()
 
 
 # Add payment command handler

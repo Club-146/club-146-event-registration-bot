@@ -2,6 +2,10 @@
 
 Deploy: prod does NOT auto-deploy — merging to `main` ships nothing. Always finish with `make deploy-prod` (or `make release-prod`, which includes it). Cause: prod app is on Coolify `source_id=2` (calmmage GitHub App), not 4 (Club-146), so no push webhook ever arrives; failure is silent, prod just keeps serving the old image. Never tell the user a merge is live — check `deployments/applications/raa8wuc20q0leqf7svr2tj83` and the `Europe/Moscow` line in `src.reminder_scheduler` startup logs. `scripts/coolify-deploy.sh`, `docs/DEPLOY.md`.
 
+Production data / payment reconciliation: bot registrations are in the prod MongoDB behind Coolify app `raa8wuc20q0leqf7svr2tj83`; website payments are separate in Yandex PostgreSQL. Never print Mongo connection env values. Use the running app container for read-only `pymongo` exports, and use `~/work/projects/146.school/scripts/db/prod-ro.sh` (`club146_ai_ro`) for website reads. Full runbook and reconciliation caveats: `docs/PRODUCTION_DATA_ACCESS.md`.
+
+Payment-proof retention: long-term deletion requires a dedicated proof-review chat; never enable chat-wide auto-delete on `EVENTS_CHAT_ID`. Configure `PAYMENT_PROOFS_CHAT_ID`; policy and legacy-cleanup boundary: `docs/PAYMENT_PROOF_RETENTION.md`.
+
 Campaign / UTM-like attribution (CRM-ish): Telegram deep links only — `t.me/<bot>?start={source}__{campaign}[__{content}]`. Classic `?utm_*=` on bot URLs does nothing. Parser + store: `App.parse_start_attribution` / `record_start_source` / `user_sources`; /start extract in `router.extract_start_payload`; registration stamps `RegisteredUser.start_source`; admin `/source_stats`. Full note: `docs/start-source-attribution.md`. Outbound mailers (e.g. 146.school event_announce) must put payload in `?start=`, not site UTM.
 
 Imports
@@ -81,4 +85,3 @@ uv for python:
 - CLIs with `typer`;
 - Keep `cli.py` colocated under each tool directory.
 - Provide short docstrings and a quick usage example per command.
-

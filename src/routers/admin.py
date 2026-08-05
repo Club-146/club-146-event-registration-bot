@@ -1,5 +1,5 @@
-import base64
-import json
+from datetime import datetime, timezone
+from html import escape
 from typing import Mapping, Optional
 
 from aiogram import Router
@@ -8,10 +8,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     Message,
 )
-from litellm import acompletion
 from loguru import logger
-from pydantic import BaseModel
 from src.app import App, GraduateType, RegisteredUser
+from src.payment_proof_analysis import (
+    PaymentDestination,
+    ReceiptStatus,
+    configured_payment_recipients,
+    extract_payment_from_image,
+)
 from src.ticket_cards import send_paid_ticket_card
 from src.website_event_bridge import (
     WebsiteBridgeError,
@@ -29,25 +33,6 @@ from botspot.utils import send_safe
 from botspot.utils.admin_filter import AdminFilter
 
 
-# Define Pydantic model for payment information
-class PaymentInfo(BaseModel):
-    amount: Optional[int]
-    is_valid: bool  # Whether there's a clear payment amount in the document
-    # True if receipt looks like a transfer to Maria (name/phone from env).
-    # False → treat as website / card payment (CloudPayments, etc.).
-    paid_to_maria: bool = False
-    method_reason: Optional[str] = None  # short free-text evidence for admins/logs
-
-    @property
-    def payment_method(self) -> str:
-        """Canonical method key used elsewhere: on_site | to_maria."""
-        return "to_maria" if self.paid_to_maria else "on_site"
-
-
-# Sonnet: Haiku was cheaper but misclassified receipts; override via PAYMENT_PARSE_MODEL.
-DEFAULT_PAYMENT_PARSE_MODEL = "anthropic/claude-sonnet-4-6"
-
-
 router = Router()
 
 
@@ -61,6 +46,7 @@ _ADMIN_SUBMENUS = {
             "manage_events": "Управление встречами",
             "manual_register": "Зарегистрировать человека вручную",
             "register_payment": "Зарегистрировать оплату (за другого участника)",
+            "payment_audit": "Сверить чеки и способы оплаты",
             "discretionary": "Скидка / бесплатный вход (решение Марии)",
             "payment_reminders": "Напоминания об оплате (D-4 / D-2)",
             "export": "Экспортировать данные",
@@ -118,6 +104,8 @@ async def _dispatch_admin_action(
         await admin_manual_register(message, state, app)
     elif response == "register_payment":
         await admin_register_payment(message, state, app)
+    elif response == "payment_audit":
+        await admin_payment_audit(message, state, app)
     elif response == "discretionary":
         await admin_discretionary_payment(message, state, app)
     elif response == "payment_reminders":
@@ -624,6 +612,147 @@ async def admin_register_payment(message: Message, state: FSMContext, app: App):
     await app.export_registered_users_to_google_sheets()
 
 
+def _proof_audit_problem(registration: dict, *, bridge_active: bool) -> str | None:
+    analysis = registration.get("payment_proof_analysis")
+    if not isinstance(analysis, dict):
+        return (
+            "нет сохранённого анализа чека"
+            if registration.get("payment_screenshot_id")
+            else None
+        )
+
+    destination = analysis.get("destination")
+    method = registration.get("payment_method")
+    receipt_status = analysis.get("receipt_status")
+    if receipt_status == ReceiptStatus.PENDING.value:
+        return "чек pending — подтвердить зачисление"
+    if receipt_status == ReceiptStatus.FAILED.value:
+        return "чек неуспешный"
+    if destination == PaymentDestination.UNKNOWN.value:
+        return "получатель в чеке не распознан"
+    if destination == PaymentDestination.EVENT_ADMIN.value and method not in {
+        "to_admin",
+        "to_maria",
+    }:
+        return "чек администратору, но способ оплаты другой"
+    if destination == PaymentDestination.WEBSITE.value and method in {
+        "to_admin",
+        "to_maria",
+    }:
+        return "чек сайта, но запись говорит «администратору»"
+
+    bridge = registration.get("website_event_bridge")
+    if (
+        bridge_active
+        and method == "on_site"
+        and registration.get("payment_status") == "confirmed"
+        and isinstance(bridge, dict)
+        and bridge.get("remote_status") not in {"paid", "waived"}
+    ):
+        return "бот подтвердил сайт, но website ledger не paid"
+    return None
+
+
+@commands_menu.add_command(
+    "payment_audit",
+    "Сверить чеки и способы оплаты",
+    visibility=Visibility.ADMIN_ONLY,
+)
+@router.message(Command("payment_audit"), AdminFilter())
+async def admin_payment_audit(message: Message, state: FSMContext, app: App) -> None:
+    """Audit stored proof evidence and repair exact admin-recipient mismatches."""
+    event_id = await _select_event_for_payment(message.chat.id, state, app)
+    if not event_id:
+        return
+
+    registrations = await app.get_all_users(event_id=event_id)
+    bridge_active = bridge_requested(app.settings)
+    fixed: list[str] = []
+    for registration in registrations:
+        analysis = registration.get("payment_proof_analysis")
+        if not isinstance(analysis, dict):
+            continue
+        if analysis.get("destination") != PaymentDestination.EVENT_ADMIN.value:
+            continue
+        if registration.get("payment_method") in {"to_admin", "to_maria"}:
+            continue
+
+        now = datetime.now(timezone.utc).isoformat()
+        previous_method = registration.get("payment_method")
+        result = await app.collection.update_one(
+            {
+                "_id": registration["_id"],
+                "payment_method": previous_method,
+                "payment_proof_analysis.destination": PaymentDestination.EVENT_ADMIN.value,
+            },
+            {
+                "$set": {
+                    "payment_method": "to_admin",
+                    "payment_method_source": "admin_proof_audit",
+                    "payment_method_override": {
+                        "from": previous_method,
+                        "to": "to_admin",
+                        "reason": "configured_event_admin_recipient",
+                        "at": now,
+                    },
+                }
+            },
+        )
+        if result.modified_count != 1:
+            continue
+        registration["payment_method"] = "to_admin"
+        fixed.append(registration.get("full_name") or str(registration["_id"]))
+        await app.save_event_log(
+            "payment_correction",
+            {
+                "action": "payment_audit_recipient_override",
+                "event_id": event_id,
+                "registration_id": str(registration["_id"]),
+                "previous_method": previous_method,
+                "new_method": "to_admin",
+                "proof_message_id": registration.get("payment_screenshot_id"),
+            },
+            message.from_user.id if message.from_user else None,
+            message.from_user.username if message.from_user else None,
+        )
+
+    analyses = [
+        registration["payment_proof_analysis"]
+        for registration in registrations
+        if isinstance(registration.get("payment_proof_analysis"), dict)
+    ]
+    problems = []
+    for registration in registrations:
+        problem = _proof_audit_problem(registration, bridge_active=bridge_active)
+        if not problem:
+            continue
+        username = registration.get("username")
+        identity = registration.get("full_name") or str(registration.get("_id"))
+        if username:
+            identity += f" @{username}"
+        problems.append(f"• {identity}: {problem}")
+
+    destination_counts = {
+        destination.value: sum(
+            analysis.get("destination") == destination.value for analysis in analyses
+        )
+        for destination in PaymentDestination
+    }
+    result_text = (
+        f"🧾 Сверка чеков\n"
+        f"Регистраций: {len(registrations)} · чеков разобрано: {len(analyses)}\n"
+        f"Администратору: {destination_counts['event_admin']} · "
+        f"сайт: {destination_counts['website']} · "
+        f"неясно: {destination_counts['unknown']}\n"
+        f"Автоисправлено сейчас: {len(fixed)} · требует внимания: {len(problems)}"
+    )
+    if problems:
+        result_text += "\n\n" + "\n".join(problems[:30])
+        if len(problems) > 30:
+            result_text += f"\n…и ещё {len(problems) - 30}"
+    await send_safe(message.chat.id, result_text)
+
+
 async def _apply_admin_confirmed_payment(
     app: App,
     message: Message,
@@ -1081,89 +1210,6 @@ async def normalize_db(message: Message, app: App):
     )
 
 
-# todo: auto-determine file type from name.
-# async def extract_payment_from_image(
-#         file_bytes: bytes
-# file_name: str
-# ) -> PaymentInfo:
-# if file_name.endswith(".pdf"):
-#     file_type = "application/pdf"
-## elif file_name.endswith(".jpg") or file_name.endswith(".jpeg") or file_name.endswith(".png"):
-# else:
-#     file_type = "image/{file_name.split('.')[-1]}"
-async def extract_payment_from_image(
-    file_bytes: bytes,
-    file_type: str = "image/jpeg",
-    *,
-    recipient_name: str | None = None,
-    recipient_phone: str | None = None,
-    model: str | None = None,
-) -> PaymentInfo:
-    """Extract amount + payment destination from image/PDF via vision (litellm).
-
-    Destination: if receipt shows *recipient_name* / *recipient_phone* (Maria),
-    set ``paid_to_maria=True``; otherwise assume website payment.
-    """
-    try:
-        name = (recipient_name or "").strip() or "(not provided)"
-        phone = (recipient_phone or "").strip() or "(not provided)"
-        system_prompt = f"""You are a payment receipt analyzer for a Russian meetup.
-Extract:
-1) payment amount in rubles (integer), if clearly visible
-2) whether this looks like a bank/SBP/phone transfer TO Maria (personal transfer),
-   vs a website / card / CloudPayments / online-acquiring payment.
-
-Maria's payment details (match loosely — formatting varies):
-- Name: {name}
-- Phone: {phone}
-
-Set paid_to_maria=true if the recipient matches this name and/or phone
-(phone digits may appear with +7/8/spaces/dashes; name may be partial or transliterated).
-Set paid_to_maria=false for website payments, card checkouts, CloudPayments,
-merchant names unrelated to Maria, or when destination is unclear.
-method_reason: one short phrase in Russian or English explaining the destination guess.
-
-If amount is missing or ambiguous: amount=null, is_valid=false.
-Destination can still be set when amount is unclear."""
-
-        encoded_file = base64.b64encode(file_bytes).decode("utf-8")
-        if file_type not in ["image/jpeg", "image/png", "application/pdf"]:
-            raise ValueError(f"Unsupported file type: {file_type}")
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Extract the payment amount and whether this receipt "
-                            "is a transfer to Maria vs a website payment."
-                        ),
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{file_type};base64,{encoded_file}"},
-                    },
-                ],
-            },
-        ]
-
-        use_model = model or DEFAULT_PAYMENT_PARSE_MODEL
-        response = await acompletion(
-            model=use_model,
-            messages=messages,
-            max_tokens=200,
-            response_format=PaymentInfo,
-        )
-
-        return PaymentInfo(**json.loads(response.choices[0].message.content))  # type: ignore[union-attr]
-    except Exception as e:
-        logger.error(f"Error extracting payment amount: {e}")
-        return PaymentInfo(amount=None, is_valid=False, paid_to_maria=False)
-
-
 def _get_file_info(response) -> Optional[tuple]:
     """Extract file_id and file_type from a message with photo or PDF.
 
@@ -1202,8 +1248,14 @@ async def _download_file(file_id: str) -> Optional[bytes]:
     "parse_payment", "Анализ платежа с помощью Claude", visibility=Visibility.ADMIN_ONLY
 )
 @router.message(Command("parse_payment"), AdminFilter())
-async def parse_payment_handler(message: Message, state: FSMContext):
-    """Hidden admin command to test payment parsing from images/PDFs"""
+async def parse_payment_handler(message: Message, state: FSMContext, app: App):
+    """Analyze one receipt against the selected event's configured admins."""
+    event_id = await _select_event_for_payment(message.chat.id, state, app)
+    if not event_id:
+        return
+    event = await app.get_event_by_id(event_id)
+    recipients = configured_payment_recipients(app.settings, event)
+
     # Ask user to send a payment proof
     response = await ask_user_raw(
         message.chat.id,
@@ -1234,15 +1286,11 @@ async def parse_payment_handler(message: Message, state: FSMContext):
             await status_msg.edit_text("❌ Не удалось скачать файл")
             return
 
-        from src.app import App
-
-        settings = App().settings
         result = await extract_payment_from_image(
             file_data,
             file_type,
-            recipient_name=settings.payment_name,
-            recipient_phone=settings.payment_phone_number,
-            model=getattr(settings, "payment_parse_model", None),
+            recipients=recipients,
+            model=getattr(app.settings, "payment_parse_model", None),
         )
 
         if result.is_valid:
@@ -1250,10 +1298,32 @@ async def parse_payment_handler(message: Message, state: FSMContext):
         else:
             response_text = "❌ Не удалось извлечь сумму платежа"
 
-        method_label = "Маше (перевод)" if result.paid_to_maria else "сайт / карта"
-        response_text += f"\n📍 Куда (AI): <b>{method_label}</b>"
+        method_labels = {
+            PaymentDestination.EVENT_ADMIN: "администратору встречи",
+            PaymentDestination.WEBSITE: "сайт / карта",
+            PaymentDestination.UNKNOWN: "неясно",
+        }
+        status_labels = {
+            ReceiptStatus.SUCCEEDED: "успешно",
+            ReceiptStatus.PENDING: "pending",
+            ReceiptStatus.FAILED: "неуспешно",
+            ReceiptStatus.UNKNOWN: "неясно",
+        }
+        response_text += f"\n📍 Получатель: <b>{method_labels[result.destination]}</b>"
+        response_text += (
+            f"\n🧾 Статус чека: <b>{status_labels[result.receipt_status]}</b>"
+        )
+        if result.recipient_name or result.recipient_phone:
+            receiver = " · ".join(
+                value
+                for value in (result.recipient_name, result.recipient_phone)
+                if value
+            )
+            response_text += f"\n👤 В чеке: <b>{escape(receiver)}</b>"
+        if result.merchant_name:
+            response_text += f"\n🏪 Магазин: <b>{escape(result.merchant_name)}</b>"
         if result.method_reason:
-            response_text += f"\n💬 {result.method_reason}"
+            response_text += f"\n💬 {escape(result.method_reason)}"
 
         await status_msg.edit_text(response_text, parse_mode="HTML")
 
