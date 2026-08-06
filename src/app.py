@@ -76,6 +76,10 @@ class AppSettings(BaseSettings):
     spreadsheet_id: Optional[str] = None
     logs_chat_id: Optional[int] = None
     events_chat_id: int
+    # Payment-proof media needs a dedicated review chat so Telegram's chat-wide
+    # auto-delete timer does not erase registration and event audit messages.
+    payment_proofs_chat_id: Optional[int] = None
+    payment_proof_retention_days: int = Field(default=365, ge=1, le=365)
     payment_phone_number: str
     payment_name: str
     # Personal /donate pay links. Prod default; override on Coolify dev if needed.
@@ -1305,6 +1309,9 @@ class App:
         payment_status: Optional[str] = None,
         payment_method: Optional[str] = None,
         payment_method_source: Optional[str] = None,
+        payment_method_claimed: Optional[str] = None,
+        payment_proof_analysis: Optional[dict] = None,
+        payment_method_override: Optional[dict] = None,
     ):
         """
         Save payment information for a user
@@ -1318,8 +1325,11 @@ class App:
             formula_amount: The payment amount calculated by formula
             username: Optional user's Telegram username for logging
             payment_status: Payment status (pending, confirmed, None for just registered)
-            payment_method: ``on_site`` | ``to_maria`` when known
-            payment_method_source: ``user`` | ``ai`` | etc.
+            payment_method: ``on_site`` | ``to_admin`` (``to_maria`` is legacy)
+            payment_method_source: ``user`` | ``proof_recipient`` | etc.
+            payment_method_claimed: What the participant selected before proof parsing
+            payment_proof_analysis: Structured receipt evidence retained for admin audit
+            payment_method_override: Evidence-backed method correction metadata
         """
         # Update the user's registration with payment info
         update_data = {
@@ -1337,6 +1347,12 @@ class App:
             update_data["payment_method"] = payment_method
         if payment_method_source is not None:
             update_data["payment_method_source"] = payment_method_source
+        if payment_method_claimed is not None:
+            update_data["payment_method_claimed"] = payment_method_claimed
+        if payment_proof_analysis is not None:
+            update_data["payment_proof_analysis"] = payment_proof_analysis
+        if payment_method_override is not None:
+            update_data["payment_method_override"] = payment_method_override
 
         # Get user registration for logging
         user_data = await self.collection.find_one(
@@ -1359,6 +1375,17 @@ class App:
             log_data["payment_method"] = payment_method
         if payment_method_source is not None:
             log_data["payment_method_source"] = payment_method_source
+        if payment_method_claimed is not None:
+            log_data["payment_method_claimed"] = payment_method_claimed
+        if payment_proof_analysis is not None:
+            log_data["payment_proof_destination"] = payment_proof_analysis.get(
+                "destination"
+            )
+            log_data["payment_proof_status"] = payment_proof_analysis.get(
+                "receipt_status"
+            )
+        if payment_method_override is not None:
+            log_data["payment_method_override"] = payment_method_override
 
         await self.save_event_log("payment_info", log_data, user_id, username)
 

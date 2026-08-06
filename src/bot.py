@@ -49,6 +49,13 @@ def main(debug=False) -> None:
     async def on_startup() -> None:
         await app.startup()
         try:
+            from src.payment_proof_retention import configure_payment_proof_retention
+
+            await configure_payment_proof_retention(bot, app.settings)
+        except Exception:
+            logger.exception("Failed to configure payment-proof retention")
+
+        try:
             from src.reminder_scheduler import start_reminder_scheduler
 
             start_reminder_scheduler(app, bot)

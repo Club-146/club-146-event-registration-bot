@@ -718,7 +718,7 @@ def test_build_user_info_text_with_graduation_year():
 
 def test_build_validation_buttons_valid_payment():
     from src.routers.payment import _build_validation_buttons
-    from src.routers.admin import PaymentInfo
+    from src.payment_proof_analysis import PaymentInfo
 
     payment_info = PaymentInfo(amount=1500, is_valid=True)
     buttons = _build_validation_buttons(
@@ -744,7 +744,7 @@ def test_build_validation_buttons_valid_payment():
 
 def test_build_validation_buttons_invalid_with_discount():
     from src.routers.payment import _build_validation_buttons
-    from src.routers.admin import PaymentInfo
+    from src.payment_proof_analysis import PaymentInfo
 
     payment_info = PaymentInfo(amount=None, is_valid=False)
     buttons = _build_validation_buttons(
@@ -764,8 +764,8 @@ def test_build_validation_buttons_invalid_with_discount():
 
 
 def test_build_validation_buttons_formula_higher():
+    from src.payment_proof_analysis import PaymentInfo
     from src.routers.payment import _build_validation_buttons
-    from src.routers.admin import PaymentInfo
 
     payment_info = PaymentInfo(amount=None, is_valid=False)
     buttons = _build_validation_buttons(
@@ -782,8 +782,8 @@ def test_build_validation_buttons_formula_higher():
 
 
 def test_build_validation_buttons_decline_callback_format():
+    from src.payment_proof_analysis import PaymentInfo
     from src.routers.payment import _build_validation_buttons
-    from src.routers.admin import PaymentInfo
 
     payment_info = PaymentInfo(amount=None, is_valid=False)
     buttons = _build_validation_buttons(
@@ -808,7 +808,7 @@ async def test_screenshot_upload_persists_pending_with_forwarded_message_id(
     _mock_botspot_dependencies,
 ):
     from src.app import GraduateType
-    from src.routers.admin import PaymentInfo
+    from src.payment_proof_analysis import PaymentDestination, PaymentInfo
     from src.routers.payment import _handle_screenshot_upload
 
     response = MagicMock(spec=Message)
@@ -821,6 +821,7 @@ async def test_screenshot_upload_persists_pending_with_forwarded_message_id(
         "class_letter": "А",
         "graduate_type": GraduateType.GRADUATE.value,
     }
+    mock_app.get_event_by_id = AsyncMock(return_value={})
     bot = _mock_botspot_dependencies.return_value.bot
     bot.send_photo = AsyncMock(return_value=MagicMock(message_id=888))
 
@@ -828,7 +829,11 @@ async def test_screenshot_upload_persists_pending_with_forwarded_message_id(
         "src.routers.payment.parse_payment_info",
         new=AsyncMock(
             return_value=PaymentInfo(
-                amount=1800, is_valid=True, paid_to_maria=False, method_reason="card"
+                amount=1800,
+                is_valid=True,
+                destination=PaymentDestination.WEBSITE,
+                merchant_name="146.school",
+                method_reason="merchant 146.school",
             )
         ),
     ):
@@ -856,20 +861,21 @@ async def test_screenshot_upload_persists_pending_with_forwarded_message_id(
     assert forwarded_save.kwargs["screenshot_message_id"] == 888
     # Direct upload (no button) → AI destination
     assert forwarded_save.kwargs["payment_method"] == "on_site"
-    assert forwarded_save.kwargs["payment_method_source"] == "ai"
+    assert forwarded_save.kwargs["payment_method_source"] == "proof_merchant"
+    assert forwarded_save.kwargs["payment_proof_analysis"]["destination"] == "website"
     caption = bot.send_photo.await_args.kwargs["caption"]
     assert "сайт" in caption.lower() or "карта" in caption.lower()
 
 
 @pytest.mark.asyncio
-async def test_screenshot_upload_ai_detects_maria(
+async def test_screenshot_recipient_overrides_user_website_choice(
     mock_message,
     mock_app,
     mock_send_safe,
     _mock_botspot_dependencies,
 ):
     from src.app import GraduateType
-    from src.routers.admin import PaymentInfo
+    from src.payment_proof_analysis import PaymentDestination, PaymentInfo
     from src.routers.payment import _handle_screenshot_upload
 
     response = MagicMock(spec=Message)
@@ -880,6 +886,7 @@ async def test_screenshot_upload_ai_detects_maria(
         "full_name": "Тест",
         "graduate_type": GraduateType.GRADUATE.value,
     }
+    mock_app.get_event_by_id = AsyncMock(return_value={})
     bot = _mock_botspot_dependencies.return_value.bot
     bot.send_photo = AsyncMock(return_value=MagicMock(message_id=202))
 
@@ -889,7 +896,10 @@ async def test_screenshot_upload_ai_detects_maria(
             return_value=PaymentInfo(
                 amount=1500,
                 is_valid=True,
-                paid_to_maria=True,
+                destination=PaymentDestination.EVENT_ADMIN,
+                recipient_name="Мария Денисовна К.",
+                recipient_phone="+7 919 488-89-10",
+                matched_admin="Мария",
                 method_reason="phone match",
             )
         ),
@@ -907,30 +917,50 @@ async def test_screenshot_upload_ai_detects_maria(
             regular_amount=1500,
             formula_amount=1500,
             graduate_type=GraduateType.GRADUATE.value,
+            payment_method="on_site",
+            payment_method_source="user",
         )
 
     forwarded_save = mock_app.save_payment_info.await_args_list[-1]
-    assert forwarded_save.kwargs["payment_method"] == "to_maria"
-    assert forwarded_save.kwargs["payment_method_source"] == "ai"
+    assert forwarded_save.kwargs["payment_method"] == "to_admin"
+    assert forwarded_save.kwargs["payment_method_source"] == "proof_recipient"
+    assert forwarded_save.kwargs["payment_method_claimed"] == "on_site"
+    assert forwarded_save.kwargs["payment_method_override"]["from"] == "on_site"
+    assert forwarded_save.kwargs["payment_method_override"]["to"] == "to_admin"
     caption = bot.send_photo.await_args.kwargs["caption"]
-    assert "Маше" in caption
+    assert "администратору" in caption
+    assert "Автоисправлено" in caption
+    correction = next(
+        call
+        for call in mock_app.save_event_log.await_args_list
+        if call.args[0] == "payment_correction"
+    )
+    assert correction.args[1]["previous_method"] == "on_site"
+    assert correction.args[1]["new_method"] == "to_admin"
 
 
 def test_payment_info_method_property():
-    from src.routers.admin import PaymentInfo
+    from src.payment_proof_analysis import PaymentDestination, PaymentInfo
 
-    assert PaymentInfo(amount=1, is_valid=True, paid_to_maria=True).payment_method == (
-        "to_maria"
+    assert (
+        PaymentInfo(
+            amount=1, is_valid=True, destination=PaymentDestination.EVENT_ADMIN
+        ).payment_method
+        == "to_admin"
     )
-    assert PaymentInfo(amount=1, is_valid=True, paid_to_maria=False).payment_method == (
-        "on_site"
+    assert (
+        PaymentInfo(
+            amount=1, is_valid=True, destination=PaymentDestination.WEBSITE
+        ).payment_method
+        == "on_site"
     )
+    assert PaymentInfo(amount=1, is_valid=True).payment_method is None
 
 
 def test_payment_method_label():
     from src.routers.payment import _payment_method_label
 
-    assert "AI" in _payment_method_label("to_maria", source="ai")
+    assert "получателю" in _payment_method_label("to_admin", source="proof_recipient")
     assert "выбрал" in _payment_method_label("on_site", source="user")
 
 
@@ -1244,7 +1274,7 @@ async def test_process_payment_paid_to_maria_asks_for_proof(
         for c in mock_app.save_event_log.call_args_list
         if c[0] and isinstance(c[0][1], dict)
     ]
-    assert "paid_to_maria_selected" in actions
+    assert "paid_to_admin_selected" in actions
 
 
 class TestSeasonAdjective:
